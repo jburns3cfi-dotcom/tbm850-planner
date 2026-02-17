@@ -7,8 +7,9 @@
 // Cloudflare CORS proxy for NOAA requests
 var WINDS_PROXY_URL = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
 
-// Altitudes in the NOAA high-level winds aloft forecast (feet MSL)
-var WIND_ALTITUDES = [18000, 24000, 30000, 34000, 39000];
+// Altitudes in the NOAA low-level winds aloft forecast (feet MSL)
+// Covers 3000 through 39000 — full TBM850 operating range
+var WIND_ALTITUDES = [3000, 6000, 9000, 12000, 18000, 24000, 30000, 34000, 39000];
 
 // Maximum distance (nm) from route centerline to use a wind station
 var MAX_STATION_DISTANCE_NM = 150;
@@ -291,7 +292,7 @@ function approximateCrossTrack(lat1, lon1, lat2, lon2, latP, lonP) {
 // ============================================================
 async function fetchNOAAWindText(forecastHr) {
     var noaaURL = 'https://aviationweather.gov/api/data/windtemp'
-        + '?region=all&level=high&fcst=' + forecastHr;
+        + '?region=all&level=low&fcst=' + forecastHr;
 
     var proxyURL = WINDS_PROXY_URL + encodeURIComponent(noaaURL);
 
@@ -334,13 +335,21 @@ function parseWindsAloftText(rawText) {
     var stations = {};
 
     // Find header line with altitude labels
+    // Low-level format: "FT  3000  6000  9000 12000 18000  24000  30000  34000  39000"
     var headerLine = null;
     var headerIndex = -1;
     for (var i = 0; i < lines.length; i++) {
-        if (lines[i].match(/\b18000\b/) && lines[i].match(/\b34000\b/)) {
-            headerLine = lines[i];
-            headerIndex = i;
-            break;
+        // Look for line containing FT and at least two of our target altitudes
+        if (lines[i].match(/\b(FT|3000|6000|9000|12000|18000|24000|30000|34000|39000)\b/)) {
+            var matchCount = 0;
+            for (var a = 0; a < WIND_ALTITUDES.length; a++) {
+                if (lines[i].indexOf(WIND_ALTITUDES[a].toString()) >= 0) matchCount++;
+            }
+            if (matchCount >= 2) {
+                headerLine = lines[i];
+                headerIndex = i;
+                break;
+            }
         }
     }
     if (!headerLine) {
