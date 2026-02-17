@@ -104,8 +104,16 @@ async function calculateAltitudeOptions(dep, dest, forecastHr) {
         results.push(plan);
     }
 
+    // Sort by total time (wind-adjusted) and keep best 3
+    results.sort(function(a, b) { return a.totals.timeMin - b.totals.timeMin; });
+    results = results.slice(0, 3);
+
+    // Magnetic course at departure point
+    var magCourse = Math.round(trueToMagnetic(trueCourse, dep.lat, dep.lon));
+
     return {
         trueCourse: Math.round(trueCourse),
+        magCourse: magCourse,
         direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
         options: results,
         windStatus: windStatus,

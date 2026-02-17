@@ -393,6 +393,7 @@ function displayResults(results, dep, dest) {
     document.getElementById('sum-route').textContent = dep.ident + ' → ' + dest.ident;
     document.getElementById('sum-dist').textContent = Math.round(totalDist);
     document.getElementById('sum-course').textContent = results.trueCourse + '°';
+    document.getElementById('sum-magcourse').textContent = results.magCourse + '°';
     document.getElementById('sum-dir').textContent = results.direction;
 
     var fuelStopEl = document.getElementById('fuel-stop-indicator');
