@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>TBM850 Flight Planner</title>
+    <link rel="stylesheet" href="css/planner.css">
+</head>
+<body>
+
+<div class="header">
+    <div>
+        <h1>TBM850 FLIGHT PLANNER</h1>
+        <div class="subtitle">N850AP — Apple Edition</div>
+    </div>
+</div>
+
+<div class="main-content">
+
+    <!-- Route Input Card -->
+    <div class="card">
+        <div class="card-title">Route</div>
+        <div class="route-inputs">
+            <div class="input-group" style="position:relative;">
+                <label for="dep-input">Departure</label>
+                <input type="text" id="dep-input" placeholder="Enter airport code or name" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false">
+                <div id="dep-info" class="airport-info"></div>
+                <div id="dep-dropdown" class="autocomplete-list"></div>
+            </div>
+            <div class="input-group" style="position:relative;">
+                <label for="dest-input">Destination</label>
+                <input type="text" id="dest-input" placeholder="Enter airport code or name" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false">
+                <div id="dest-info" class="airport-info"></div>
+                <div id="dest-dropdown" class="autocomplete-list"></div>
+            </div>
+        </div>
+        <button id="btn-calc" class="btn-calculate" disabled>Calculate Flight Plan</button>
+    </div>
+
+    <!-- Results Section -->
+    <div id="results-section" class="results-section">
+
+        <!-- Route Summary -->
+        <div class="card">
+            <div class="card-title" id="sum-route">—</div>
+            <div class="route-summary">
+                <div class="summary-item">
+                    <div class="value" id="sum-dist">—</div>
+                    <div class="label">Distance (nm)</div>
+                </div>
+                <div class="summary-item">
+                    <div class="value" id="sum-course">—</div>
+                    <div class="label">True Course</div>
+                </div>
+                <div class="summary-item">
+                    <div class="value" id="sum-dir">—</div>
+                    <div class="label">Direction</div>
+                </div>
+            </div>
+            <div id="fuel-stop-indicator"></div>
+        </div>
+
+        <!-- Altitude Options -->
+        <div class="card">
+            <div class="card-title">Altitude Options <span style="font-size:0.65rem;color:var(--text-label);font-weight:400;">(tap row for detail)</span></div>
+            <table class="alt-table">
+                <thead>
+                    <tr>
+                        <th>Altitude</th>
+                        <th>Time</th>
+                        <th>Fuel (gal)</th>
+                        <th>TAS</th>
+                        <th>GS</th>
+                    </tr>
+                </thead>
+                <tbody id="alt-table-body"></tbody>
+            </table>
+        </div>
+
+        <!-- Phase Breakdown -->
+        <div class="card">
+            <div id="phase-detail" class="phase-detail">
+                <div class="card-title">Select an altitude above</div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- Status Bar -->
+<div class="status-bar">
+    <div>
+        <span id="status-dot" class="status-dot loading"></span>
+        <span id="status-text">Initializing...</span>
+    </div>
+    <div>No wind correction</div>
+</div>
+
+<!-- Load modules in dependency order -->
+<script src="js/airports.js"></script>
+<script src="js/performance.js"></script>
+<script src="js/route.js"></script>
+<script src="js/flight-calc.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>
