@@ -1,11 +1,16 @@
 // ============================================================
 // FLIGHT CALC MODULE — Complete Flight Planning
 // TBM850 Apple Flight Planner
-// Requires: performance.js, route.js loaded first
+// Requires: performance.js, route.js, winds.js loaded first
 // ============================================================
 
 // Calculate a complete flight from departure to destination
-function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
+// dep: { ident, lat, lon, elevation }
+// dest: { ident, lat, lon, elevation }
+// cruiseAlt: altitude in feet MSL
+// groundSpeed: optional wind-corrected GS (null = use TAS)
+// windSummary: optional wind info object for display
+function calculateFlight(dep, dest, cruiseAlt, groundSpeed, windSummary) {
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
 
@@ -17,7 +22,9 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
 
     // Phase 3: Cruise (remaining distance)
     var cruiseDist = totalDist - climb.distanceNM - descent.distanceNM;
-    if (cruiseDist < 0) cruiseDist = 0;
+    if (cruiseDist < 0) {
+        cruiseDist = 0;
+    }
     var cruise = calculateCruise(cruiseDist, cruiseAlt, groundSpeed);
 
     // Totals
@@ -36,7 +43,8 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
             timeMin:    cruise.timeMin,
             fuelGal:    cruise.fuelGal,
             tas:        cruise.tas,
-            groundSpeed: groundSpeed || cruise.tas
+            groundSpeed: groundSpeed || cruise.tas,
+            wind:       windSummary || null
         },
         descent:     descent,
         totals: {
@@ -48,36 +56,60 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
     };
 }
 
-// Calculate flights at ALL valid altitudes, rank by total time, return best 3
-function calculateAltitudeOptions(dep, dest) {
+// Calculate flights at multiple altitudes for comparison
+// Now async — fetches wind data then calculates all options
+// dep/dest: airport objects with ident, lat, lon, elevation
+// forecastHr: '06', '12', or '24' (from existing day/time logic)
+//   If null/undefined, calculates without wind correction
+async function calculateAltitudeOptions(dep, dest, forecastHr) {
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
+    var altitudes = getTop3Altitudes(trueCourse);
 
-    // Magnetic course at departure point for FAA altitude rules
-    var magCourse = getMagneticCourse(trueCourse, dep.lat, dep.lon);
-    var magVar = estimateMagVar(dep.lat, dep.lon);
+    // Attempt to fetch wind data
+    var routeWindData = null;
+    var windStatus = 'none';
 
-    // Get valid altitudes based on magnetic course (FAR 91.179)
-    var allAltitudes = getTop3Altitudes(magCourse);
-    var allPlans = [];
-
-    for (var i = 0; i < allAltitudes.length; i++) {
-        var plan = calculateFlight(dep, dest, allAltitudes[i], null);
-        allPlans.push(plan);
+    if (forecastHr) {
+        try {
+            routeWindData = await fetchRouteWinds(dep, dest, forecastHr);
+            if (routeWindData && routeWindData.stationList.length > 0) {
+                windStatus = 'ok';
+                console.log('Wind data loaded: ' + routeWindData.stationList.length + ' stations');
+            } else {
+                windStatus = 'no-stations';
+                console.warn('Wind fetch returned no usable stations');
+            }
+        } catch (err) {
+            windStatus = 'error';
+            console.error('Wind fetch error:', err);
+        }
     }
 
-    // Sort by total time (best first)
-    allPlans.sort(function(a, b) {
-        return a.totals.timeMin - b.totals.timeMin;
-    });
+    // Calculate each altitude option with wind correction
+    var results = [];
+    for (var i = 0; i < altitudes.length; i++) {
+        var alt = altitudes[i];
+        var perf = getPerformanceAtAltitude(alt);
+        var gs = null;
+        var windInfo = null;
 
-    var top3 = allPlans.slice(0, 3);
+        if (routeWindData) {
+            windInfo = getWindSummary(routeWindData, alt, trueCourse, perf.cruiseTAS);
+            if (windInfo.available) {
+                gs = windInfo.gs;
+            }
+        }
+
+        var plan = calculateFlight(dep, dest, alt, gs, windInfo);
+        results.push(plan);
+    }
 
     return {
         trueCourse: Math.round(trueCourse),
-        magCourse: Math.round(magCourse),
-        magVar: magVar,
-        direction: magCourse < 180 ? 'Easterly' : 'Westerly',
-        options: top3
+        direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
+        options: results,
+        windStatus: windStatus,
+        windStations: routeWindData ? routeWindData.stationList.length : 0
     };
 }
 
