@@ -7,6 +7,7 @@
 var appState = {
     departure: null,
     destination: null,
+    depTime: null,
     lastResults: null
 };
 
@@ -15,6 +16,9 @@ var appState = {
 // ============================================================
 function initApp() {
     updateStatus('loading', 'Loading airports...');
+
+    // Set departure time to current local time (rounded to next 15 min)
+    initDepTime();
 
     // Try loading CSV from relative path first, then GitHub raw
     var csvUrls = [
@@ -30,17 +34,99 @@ function initApp() {
         updateStatus('ok', airportDB.length + ' airports loaded');
         setupAutocomplete('dep-input', 'dep-dropdown', 'dep-info', function(apt) {
             appState.departure = apt;
+            updateDepTimezone();
             checkReady();
         });
         setupAutocomplete('dest-input', 'dest-dropdown', 'dest-info', function(apt) {
             appState.destination = apt;
             checkReady();
         });
+
+        // Departure time change handler
+        document.getElementById('dep-time').addEventListener('change', function() {
+            appState.depTime = this.value || null;
+            updateZuluDisplay();
+            checkReady();
+        });
+
         document.getElementById('btn-calc').addEventListener('click', runCalculation);
 
         // Focus departure field
         document.getElementById('dep-input').focus();
     });
+}
+
+function initDepTime() {
+    var now = new Date();
+    // Round up to next 15 minutes
+    var mins = now.getMinutes();
+    var roundUp = Math.ceil(mins / 15) * 15;
+    if (roundUp >= 60) {
+        now.setHours(now.getHours() + 1);
+        now.setMinutes(0);
+    } else {
+        now.setMinutes(roundUp);
+    }
+    var hh = String(now.getHours()).padStart(2, '0');
+    var mm = String(now.getMinutes()).padStart(2, '0');
+    var timeStr = hh + ':' + mm;
+    document.getElementById('dep-time').value = timeStr;
+    appState.depTime = timeStr;
+}
+
+// Show timezone label based on departure airport location
+function updateDepTimezone() {
+    var tzLabel = document.getElementById('dep-tz');
+    if (!appState.departure) {
+        tzLabel.textContent = '';
+        return;
+    }
+    var tz = estimateTimezone(appState.departure.lon);
+    tzLabel.textContent = tz;
+    updateZuluDisplay();
+}
+
+// Estimate US timezone from longitude
+function estimateTimezone(lon) {
+    if (lon > -67.5) return 'AST';
+    if (lon > -82.5) return 'EST';
+    if (lon > -97.5) return 'CST';
+    if (lon > -112.5) return 'MST';
+    if (lon > -127.5) return 'PST';
+    if (lon > -142.5) return 'AKST';
+    return 'HST';
+}
+
+// Get UTC offset hours for timezone abbreviation
+function tzOffsetHours(tz) {
+    var offsets = { 'AST': -4, 'EST': -5, 'CST': -6, 'MST': -7, 'PST': -8, 'AKST': -9, 'HST': -10 };
+    // Check if DST is in effect
+    var now = new Date();
+    var jan = new Date(now.getFullYear(), 0, 1);
+    var jul = new Date(now.getFullYear(), 6, 1);
+    var isDST = now.getTimezoneOffset() < Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
+    var base = offsets[tz] || -6;
+    // HST and AST don't observe DST
+    if (isDST && tz !== 'HST' && tz !== 'AST') base += 1;
+    return base;
+}
+
+// Display Zulu time below the local time input
+function updateZuluDisplay() {
+    var zuluEl = document.getElementById('dep-time-zulu');
+    if (!appState.depTime || !appState.departure) {
+        zuluEl.textContent = '';
+        return;
+    }
+    var parts = appState.depTime.split(':');
+    var localHrs = parseInt(parts[0]);
+    var localMins = parseInt(parts[1]);
+    var tz = estimateTimezone(appState.departure.lon);
+    var offset = tzOffsetHours(tz);
+    var zuluHrs = (localHrs - offset + 24) % 24;
+    var zuluStr = String(zuluHrs).padStart(2, '0') + String(localMins).padStart(2, '0') + 'Z';
+    zuluEl.textContent = zuluStr;
+    zuluEl.className = 'airport-info valid';
 }
 
 function tryLoadAirports(urls, idx, callback) {
@@ -181,11 +267,11 @@ function escHTML(s) {
 // ============================================================
 function checkReady() {
     var btn = document.getElementById('btn-calc');
-    btn.disabled = !(appState.departure && appState.destination);
+    btn.disabled = !(appState.departure && appState.destination && appState.depTime);
 }
 
 function runCalculation() {
-    if (!appState.departure || !appState.destination) return;
+    if (!appState.departure || !appState.destination || !appState.depTime) return;
 
     var dep = appState.departure;
     var dest = appState.destination;
