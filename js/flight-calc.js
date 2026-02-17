@@ -5,11 +5,6 @@
 // ============================================================
 
 // Calculate a complete flight from departure to destination
-// dep: { ident, lat, lon, elevation }
-// dest: { ident, lat, lon, elevation }
-// cruiseAlt: altitude in feet MSL
-// groundSpeed: optional wind-corrected GS (null = use TAS)
-// Returns full flight plan with all phases
 function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
@@ -22,10 +17,7 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
 
     // Phase 3: Cruise (remaining distance)
     var cruiseDist = totalDist - climb.distanceNM - descent.distanceNM;
-    if (cruiseDist < 0) {
-        // Route too short for full climb + descent at this altitude
-        cruiseDist = 0;
-    }
+    if (cruiseDist < 0) cruiseDist = 0;
     var cruise = calculateCruise(cruiseDist, cruiseAlt, groundSpeed);
 
     // Totals
@@ -59,27 +51,32 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
 // Calculate flights at ALL valid altitudes, rank by total time, return best 3
 function calculateAltitudeOptions(dep, dest) {
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
-    var allAltitudes = getTop3Altitudes(trueCourse);
+
+    // Magnetic course at departure point for FAA altitude rules
+    var magCourse = getMagneticCourse(trueCourse, dep.lat, dep.lon);
+    var magVar = estimateMagVar(dep.lat, dep.lon);
+
+    // Get valid altitudes based on magnetic course (FAR 91.179)
+    var allAltitudes = getTop3Altitudes(magCourse);
     var allPlans = [];
 
-    // Calculate full flight plan for every valid altitude
     for (var i = 0; i < allAltitudes.length; i++) {
         var plan = calculateFlight(dep, dest, allAltitudes[i], null);
         allPlans.push(plan);
     }
 
-    // Sort by total time (best first) — when winds are added, this will
-    // naturally rank by ground speed advantage
+    // Sort by total time (best first)
     allPlans.sort(function(a, b) {
         return a.totals.timeMin - b.totals.timeMin;
     });
 
-    // Return best 3
     var top3 = allPlans.slice(0, 3);
 
     return {
         trueCourse: Math.round(trueCourse),
-        direction: trueCourse < 180 ? 'Easterly' : 'Westerly',
+        magCourse: Math.round(magCourse),
+        magVar: magVar,
+        direction: magCourse < 180 ? 'Easterly' : 'Westerly',
         options: top3
     };
 }

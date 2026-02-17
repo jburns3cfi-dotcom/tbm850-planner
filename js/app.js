@@ -17,10 +17,8 @@ var appState = {
 function initApp() {
     updateStatus('loading', 'Loading airports...');
 
-    // Set departure time to current local time (rounded to next 15 min)
     initDepTime();
 
-    // Try loading CSV from relative path first, then GitHub raw
     var csvUrls = [
         'us-airports.csv',
         'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv'
@@ -42,7 +40,6 @@ function initApp() {
             checkReady();
         });
 
-        // Departure time change handler
         document.getElementById('dep-time').addEventListener('change', function() {
             appState.depTime = this.value || null;
             updateZuluDisplay();
@@ -50,15 +47,12 @@ function initApp() {
         });
 
         document.getElementById('btn-calc').addEventListener('click', runCalculation);
-
-        // Focus departure field
         document.getElementById('dep-input').focus();
     });
 }
 
 function initDepTime() {
     var now = new Date();
-    // Round up to next 15 minutes
     var mins = now.getMinutes();
     var roundUp = Math.ceil(mins / 15) * 15;
     if (roundUp >= 60) {
@@ -74,7 +68,6 @@ function initDepTime() {
     appState.depTime = timeStr;
 }
 
-// Show timezone label based on departure airport location
 function updateDepTimezone() {
     var tzLabel = document.getElementById('dep-tz');
     if (!appState.departure) {
@@ -86,7 +79,6 @@ function updateDepTimezone() {
     updateZuluDisplay();
 }
 
-// Estimate US timezone from longitude
 function estimateTimezone(lon) {
     if (lon > -67.5) return 'AST';
     if (lon > -82.5) return 'EST';
@@ -97,21 +89,17 @@ function estimateTimezone(lon) {
     return 'HST';
 }
 
-// Get UTC offset hours for timezone abbreviation
 function tzOffsetHours(tz) {
     var offsets = { 'AST': -4, 'EST': -5, 'CST': -6, 'MST': -7, 'PST': -8, 'AKST': -9, 'HST': -10 };
-    // Check if DST is in effect
     var now = new Date();
     var jan = new Date(now.getFullYear(), 0, 1);
     var jul = new Date(now.getFullYear(), 6, 1);
     var isDST = now.getTimezoneOffset() < Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
     var base = offsets[tz] || -6;
-    // HST and AST don't observe DST
     if (isDST && tz !== 'HST' && tz !== 'AST') base += 1;
     return base;
 }
 
-// Display Zulu time below the local time input
 function updateZuluDisplay() {
     var zuluEl = document.getElementById('dep-time-zulu');
     if (!appState.depTime || !appState.departure) {
@@ -181,7 +169,6 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         dropdown.classList.add('active');
     });
 
-    // Keyboard navigation
     input.addEventListener('keydown', function(e) {
         if (!dropdown.classList.contains('active')) return;
         var items = dropdown.querySelectorAll('.autocomplete-item');
@@ -205,14 +192,12 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         }
     });
 
-    // Close on outside tap
     document.addEventListener('click', function(e) {
         if (!input.contains(e.target) && !dropdown.contains(e.target)) {
             dropdown.classList.remove('active');
         }
     });
 
-    // Also try exact match on blur (user typed full code and tabbed away)
     input.addEventListener('blur', function() {
         setTimeout(function() {
             if (appState.departure && inputId === 'dep-input') return;
@@ -293,7 +278,8 @@ function displayResults(results, dep, dest) {
     // Route summary
     document.getElementById('sum-route').textContent = dep.ident + ' → ' + dest.ident;
     document.getElementById('sum-dist').textContent = Math.round(totalDist);
-    document.getElementById('sum-course').textContent = results.trueCourse + '°';
+    document.getElementById('sum-tc').textContent = results.trueCourse + '°';
+    document.getElementById('sum-mc').textContent = results.magCourse + '°';
     document.getElementById('sum-dir').textContent = results.direction;
 
     // Fuel stop check
@@ -308,7 +294,6 @@ function displayResults(results, dep, dest) {
     var tbody = document.getElementById('alt-table-body');
     tbody.innerHTML = '';
 
-    // Find best (shortest time) option
     var bestIdx = 0;
     for (var i = 1; i < results.options.length; i++) {
         if (results.options[i].totals.timeMin < results.options[bestIdx].totals.timeMin) {
@@ -332,10 +317,7 @@ function displayResults(results, dep, dest) {
         tbody.appendChild(tr);
     }
 
-    // Auto-show phase detail for best option
     displayPhaseDetail(results.options[bestIdx]);
-
-    // Scroll to results
     section.scrollIntoView({ behavior: 'smooth' });
 }
 

@@ -6,7 +6,6 @@
 var CLIMB_FACTOR = 1.40;
 var DESCENT_FACTOR = 1.12;
 var TAXI_FUEL = 8;
-var FUEL_BURN_HOURLY = { firstHour: 75, subsequent: 65 };
 var CLIMB_FUEL_FLOW = { low: { alt: 2000, gph: 78 }, high: { alt: 31000, gph: 54 } };
 var DESCENT_FUEL_FLOW = { low: { alt: 2000, gph: 78 }, high: { alt: 31000, gph: 46 } };
 
@@ -74,6 +73,7 @@ function interpolateFuelFlow(endpoints, altitude) {
     return endpoints.low.gph + (endpoints.high.gph - endpoints.low.gph) * frac;
 }
 
+// Climb: uses climb fuel flow interpolated by altitude, with CLIMB_FACTOR
 function calculateClimb(departureElevFt, cruiseAltFt) {
     if (cruiseAltFt <= departureElevFt) return { timeMin: 0, fuelGal: 0, distanceNM: 0 };
 
@@ -103,6 +103,7 @@ function calculateClimb(departureElevFt, cruiseAltFt) {
     };
 }
 
+// Descent: uses descent fuel flow interpolated by altitude, with DESCENT_FACTOR
 function calculateDescent(cruiseAltFt, destElevFt) {
     if (cruiseAltFt <= destElevFt) return { timeMin: 0, fuelGal: 0, distanceNM: 0 };
 
@@ -133,18 +134,14 @@ function calculateDescent(cruiseAltFt, destElevFt) {
     };
 }
 
+// Cruise: uses altitude-specific GPH from performance table
 function calculateCruise(cruiseDistNM, altitude, groundSpeed) {
     if (cruiseDistNM <= 0) return { timeMin: 0, fuelGal: 0, tas: 0 };
     var perf = getPerformanceAtAltitude(altitude);
     var gs = groundSpeed || perf.cruiseTAS;
     var timeHrs = cruiseDistNM / gs;
     var timeMin = timeHrs * 60;
-    var fuelGal;
-    if (timeHrs <= 1) {
-        fuelGal = FUEL_BURN_HOURLY.firstHour * timeHrs;
-    } else {
-        fuelGal = FUEL_BURN_HOURLY.firstHour + FUEL_BURN_HOURLY.subsequent * (timeHrs - 1);
-    }
+    var fuelGal = perf.cruiseGPH * timeHrs;
     return {
         timeMin: Math.round(timeMin * 10) / 10,
         fuelGal: Math.round(fuelGal * 10) / 10,
@@ -155,7 +152,7 @@ function calculateCruise(cruiseDistNM, altitude, groundSpeed) {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         PERFORMANCE_TABLE, CLIMB_FACTOR, DESCENT_FACTOR,
-        TAXI_FUEL, FUEL_BURN_HOURLY,
-        getPerformanceAtAltitude, calculateClimb, calculateDescent, calculateCruise
+        TAXI_FUEL, getPerformanceAtAltitude,
+        calculateClimb, calculateDescent, calculateCruise
     };
 }

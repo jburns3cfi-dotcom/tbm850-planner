@@ -1,5 +1,5 @@
 // ============================================================
-// ROUTE MODULE — Great Circle Math
+// ROUTE MODULE — Great Circle Math & Magnetic Variation
 // TBM850 Apple Flight Planner
 // ============================================================
 
@@ -28,6 +28,23 @@ function initialBearing(lat1, lon1, lat2, lon2) {
             Math.sin(rlat1) * Math.cos(rlat2) * Math.cos(dLon);
     var brng = Math.atan2(x, y) * RAD2DEG;
     return (brng + 360) % 360;
+}
+
+// ============================================================
+// MAGNETIC VARIATION — Approximate for CONUS (2025 epoch)
+// Polynomial fit from WMM 2025 data points, ~2-3° accuracy
+// Positive = East variation, Negative = West variation
+// ============================================================
+function estimateMagVar(lat, lon) {
+    return Math.round((-0.571 * lon + 0.037 * lat - 54.2) * 10) / 10;
+}
+
+// Get magnetic course from true course at a given location
+function getMagneticCourse(trueCourse, lat, lon) {
+    var magVar = estimateMagVar(lat, lon);
+    // Magnetic course = true course - East variation (+ West variation)
+    var mc = trueCourse - magVar;
+    return ((mc % 360) + 360) % 360;
 }
 
 // Intermediate point along great circle at given fraction (0 = start, 1 = end)
@@ -69,11 +86,11 @@ function routeWaypoints(lat1, lon1, lat2, lon2, intervalNM) {
     return points;
 }
 
-// FAA IFR Cruising Altitude Rules (FL180+):
+// FAA IFR Cruising Altitude Rules (FAR 91.179) — based on MAGNETIC course:
 // Easterly headings (0°-179°): ODD flight levels — FL250, FL270, FL290, FL310
 // Westerly headings (180°-359°): EVEN flight levels — FL240, FL260, FL280, FL300
-function getValidAltitudes(trueCourse, minAlt, maxAlt) {
-    var isEasterly = trueCourse >= 0 && trueCourse < 180;
+function getValidAltitudes(magCourse, minAlt, maxAlt) {
+    var isEasterly = magCourse >= 0 && magCourse < 180;
     var alts = [];
     if (isEasterly) {
         // Odd flight levels: FL250, FL270, FL290, FL310
@@ -91,14 +108,15 @@ function getValidAltitudes(trueCourse, minAlt, maxAlt) {
     return alts;
 }
 
-// Get all valid altitudes for this course — ranking is done in flight-calc.js
-function getTop3Altitudes(trueCourse) {
-    return getValidAltitudes(trueCourse, 24000, 31000);
+// Get all valid altitudes for this magnetic course
+function getTop3Altitudes(magCourse) {
+    return getValidAltitudes(magCourse, 24000, 31000);
 }
 
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         greatCircleDistance, initialBearing, intermediatePoint,
-        routeWaypoints, getValidAltitudes, getTop3Altitudes
+        routeWaypoints, getValidAltitudes, getTop3Altitudes,
+        estimateMagVar, getMagneticCourse
     };
 }
