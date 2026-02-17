@@ -35,6 +35,14 @@
                 <div id="dest-info" class="airport-info"></div>
                 <div id="dest-dropdown" class="autocomplete-list"></div>
             </div>
+            <div class="input-group">
+                <label for="dep-time">Departure Time (local)</label>
+                <div class="time-input-row">
+                    <input type="time" id="dep-time" value="">
+                    <span id="dep-tz" class="tz-label"></span>
+                </div>
+                <div id="dep-time-zulu" class="airport-info"></div>
+            </div>
         </div>
         <button id="btn-calc" class="btn-calculate" disabled>Calculate Flight Plan</button>
     </div>
