@@ -69,21 +69,21 @@ function routeWaypoints(lat1, lon1, lat2, lon2, intervalNM) {
     return points;
 }
 
-// FAA odd/even altitude rules
-// Eastbound (0-179°): odd thousands + 500 → FL190, FL210, FL230, FL250, FL270, FL290, FL310
-// Westbound (180-359°): even thousands + 500 → FL200, FL220, FL240, FL260, FL280, FL300
+// FAA IFR Cruising Altitude Rules (FL180+):
+// Easterly headings (0°-179°): ODD flight levels — FL250, FL270, FL290, FL310
+// Westerly headings (180°-359°): EVEN flight levels — FL240, FL260, FL280, FL300
 function getValidAltitudes(trueCourse, minAlt, maxAlt) {
-    var isEastbound = trueCourse >= 0 && trueCourse < 180;
+    var isEasterly = trueCourse >= 0 && trueCourse < 180;
     var alts = [];
-    if (isEastbound) {
-        // Odd flight levels: 190, 210, 230, 250, 270, 290, 310
-        for (var fl = 190; fl <= 310; fl += 20) {
+    if (isEasterly) {
+        // Odd flight levels: FL250, FL270, FL290, FL310
+        for (var fl = 250; fl <= 310; fl += 20) {
             var alt = fl * 100;
             if (alt >= minAlt && alt <= maxAlt) alts.push(alt);
         }
     } else {
-        // Even flight levels: 180, 200, 220, 240, 260, 280, 300
-        for (var fl = 180; fl <= 300; fl += 20) {
+        // Even flight levels: FL240, FL260, FL280, FL300
+        for (var fl = 240; fl <= 300; fl += 20) {
             var alt = fl * 100;
             if (alt >= minAlt && alt <= maxAlt) alts.push(alt);
         }
@@ -91,11 +91,9 @@ function getValidAltitudes(trueCourse, minAlt, maxAlt) {
     return alts;
 }
 
-// Get top 3 altitude options based on course direction
+// Get all valid altitudes for this course — ranking is done in flight-calc.js
 function getTop3Altitudes(trueCourse) {
-    var allValid = getValidAltitudes(trueCourse, 18000, 31000);
-    // Return up to 3, preferring higher altitudes (better fuel efficiency)
-    return allValid.slice(-3).reverse();
+    return getValidAltitudes(trueCourse, 24000, 31000);
 }
 
 if (typeof module !== 'undefined' && module.exports) {

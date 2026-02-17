@@ -24,7 +24,6 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
     var cruiseDist = totalDist - climb.distanceNM - descent.distanceNM;
     if (cruiseDist < 0) {
         // Route too short for full climb + descent at this altitude
-        // Adjust: reduce cruise to 0, pro-rate climb and descent
         cruiseDist = 0;
     }
     var cruise = calculateCruise(cruiseDist, cruiseAlt, groundSpeed);
@@ -57,21 +56,31 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
     };
 }
 
-// Calculate flights at multiple altitudes for comparison
+// Calculate flights at ALL valid altitudes, rank by total time, return best 3
 function calculateAltitudeOptions(dep, dest) {
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
-    var altitudes = getTop3Altitudes(trueCourse);
-    var results = [];
+    var allAltitudes = getTop3Altitudes(trueCourse);
+    var allPlans = [];
 
-    for (var i = 0; i < altitudes.length; i++) {
-        var plan = calculateFlight(dep, dest, altitudes[i], null);
-        results.push(plan);
+    // Calculate full flight plan for every valid altitude
+    for (var i = 0; i < allAltitudes.length; i++) {
+        var plan = calculateFlight(dep, dest, allAltitudes[i], null);
+        allPlans.push(plan);
     }
+
+    // Sort by total time (best first) — when winds are added, this will
+    // naturally rank by ground speed advantage
+    allPlans.sort(function(a, b) {
+        return a.totals.timeMin - b.totals.timeMin;
+    });
+
+    // Return best 3
+    var top3 = allPlans.slice(0, 3);
 
     return {
         trueCourse: Math.round(trueCourse),
-        direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
-        options: results
+        direction: trueCourse < 180 ? 'Easterly' : 'Westerly',
+        options: top3
     };
 }
 
