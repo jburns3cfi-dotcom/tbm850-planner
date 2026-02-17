@@ -5,7 +5,7 @@
 
 // ── Configuration ──────────────────────────────────────────
 // Update PROXY_BASE to match your Cloudflare Worker URL
-var PROXY_BASE = 'https://tbm850-proxy.YOUR-SUBDOMAIN.workers.dev';
+var PROXY_BASE = 'https://tbm850-proxy.jburns3cfi.workers.dev';
 
 // ── Timezone Cache ─────────────────────────────────────────
 // Avoids re-fetching timezone for the same airport
