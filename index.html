@@ -34,15 +34,44 @@
                 <input type="text" id="dest-input" placeholder="Enter airport code or name" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false">
                 <div id="dest-info" class="airport-info"></div>
                 <div id="dest-dropdown" class="autocomplete-list"></div>
-            </div>
-            <div class="input-group">
-                <label for="dep-time">Departure Time (local)</label>
-                <div class="time-input-row">
-                    <input type="time" id="dep-time" value="">
-                    <span id="dep-tz" class="tz-label"></span>
-                </div>
-                <div id="dep-time-zulu" class="airport-info"></div>
-            </div>
+    <!-- ============================================================
+     DEPARTURE DAY/TIME SELECTOR — Replace existing departure time section
+     Drop this into index.html where the current departure time input is
+     ============================================================ -->
+
+<!-- Add this script tag BEFORE app.js in index.html -->
+<!-- <script src="js/timezone.js"></script> -->
+
+<!-- ── DEPARTURE TIME SECTION ── -->
+<div class="departure-time-section">
+    <label class="input-label">DEPARTURE DAY & TIME (LOCAL)</label>
+    
+    <!-- Day selector row -->
+    <div class="day-selector" id="daySelectorRow">
+        <!-- Buttons are generated dynamically by initDaySelector() -->
+    </div>
+    
+    <!-- Time input + Zulu display -->
+    <div class="time-row">
+        <input type="text" 
+               id="depTimeInput" 
+               class="time-input" 
+               placeholder="0800" 
+               maxlength="4" 
+               inputmode="numeric"
+               pattern="[0-9]*"
+               autocomplete="off">
+        <span class="time-label" id="depTimezoneLabel">local</span>
+        <span class="time-separator">→</span>
+        <span class="zulu-display" id="depZuluDisplay">----Z</span>
+    </div>
+    
+    <!-- Forecast period indicator -->
+    <div class="forecast-indicator" id="forecastIndicator">
+        <!-- Shows: "Using 6-Hour Forecast" or warning if past -->
+    </div>
+</div>
+
         </div>
         <button id="btn-calc" class="btn-calculate" disabled>Calculate Flight Plan</button>
     </div>
