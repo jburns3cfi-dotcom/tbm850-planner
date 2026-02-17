@@ -8,7 +8,11 @@
 var appState = {
     departure: null,
     destination: null,
-    lastResults: null
+    lastResults: null,
+    selectedDay: null,
+    departureTimezone: null,
+    forecastPeriod: '06',
+    departureInfo: null
 };
 
 // ============================================================
@@ -17,9 +21,10 @@ var appState = {
 function initApp() {
     updateStatus('loading', 'Loading airports...');
 
-    // Try loading CSV from relative path first, then GitHub raw
     var csvUrls = [
         'data/us-airports.csv',
+        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/data/us-airports.csv',
+        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv',
         'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/main/us-airports.csv'
     ];
 
@@ -29,17 +34,26 @@ function initApp() {
             return;
         }
         updateStatus('ok', airportDB.length + ' airports loaded');
+
         setupAutocomplete('dep-input', 'dep-dropdown', 'dep-info', function(apt) {
             appState.departure = apt;
+            if (apt) {
+                resolveDepTimezone(apt);
+            } else {
+                appState.departureTimezone = null;
+                document.getElementById('depTimezoneLabel').textContent = 'local';
+            }
             checkReady();
         });
         setupAutocomplete('dest-input', 'dest-dropdown', 'dest-info', function(apt) {
             appState.destination = apt;
             checkReady();
         });
-        document.getElementById('btn-calc').addEventListener('click', runCalculation);
 
-        // Focus departure field
+        initDaySelector();
+        initTimeInput();
+
+        document.getElementById('btn-calc').addEventListener('click', runCalculation);
         document.getElementById('dep-input').focus();
     });
 }
@@ -57,6 +71,150 @@ function tryLoadAirports(urls, idx, callback) {
             callback(null);
         }
     });
+}
+
+// ============================================================
+// DAY SELECTOR — 7 pills starting from Today
+// ============================================================
+function initDaySelector() {
+    var row = document.getElementById('daySelectorRow');
+    if (!row) return;
+
+    var days = getDayOptions();
+    row.innerHTML = '';
+
+    for (var i = 0; i < days.length; i++) {
+        var btn = document.createElement('button');
+        btn.className = 'day-pill' + (i === 0 ? ' active' : '');
+        btn.textContent = days[i].label;
+        btn.setAttribute('data-day-index', i);
+
+        (function(dayObj, button) {
+            button.addEventListener('click', function() {
+                var pills = row.querySelectorAll('.day-pill');
+                for (var p = 0; p < pills.length; p++) {
+                    pills[p].classList.remove('active');
+                }
+                button.classList.add('active');
+                appState.selectedDay = dayObj.date;
+                updateZuluDisplay();
+            });
+        })(days[i], btn);
+
+        row.appendChild(btn);
+    }
+
+    appState.selectedDay = days[0].date;
+}
+
+// ============================================================
+// TIME INPUT — Military time entry + Zulu conversion
+// ============================================================
+function initTimeInput() {
+    var input = document.getElementById('depTimeInput');
+    if (!input) return;
+
+    input.addEventListener('input', function() {
+        var val = input.value.replace(/[^0-9]/g, '');
+        if (val.length > 4) val = val.substring(0, 4);
+        input.value = val;
+
+        if (val.length === 4) {
+            var hrs = parseInt(val.substring(0, 2));
+            var mins = parseInt(val.substring(2, 4));
+            if (hrs > 23 || mins > 59) {
+                input.classList.add('invalid');
+                document.getElementById('depZuluDisplay').textContent = '----Z';
+                return;
+            }
+            input.classList.remove('invalid');
+            updateZuluDisplay();
+        } else {
+            document.getElementById('depZuluDisplay').textContent = '----Z';
+            updateForecastIndicator(null);
+        }
+    });
+
+    input.addEventListener('blur', function() {
+        var val = input.value.replace(/[^0-9]/g, '');
+        if (val.length > 0 && val.length < 4) {
+            while (val.length < 4) val = '0' + val;
+            input.value = val;
+            updateZuluDisplay();
+        }
+    });
+}
+
+// ============================================================
+// TIMEZONE RESOLUTION
+// ============================================================
+async function resolveDepTimezone(apt) {
+    var tzLabel = document.getElementById('depTimezoneLabel');
+    tzLabel.textContent = '...';
+
+    try {
+        var tz = await getAirportTimezone(apt.ident, apt.lat, apt.lon);
+        appState.departureTimezone = tz;
+        var abbr = getTimezoneAbbr(tz, appState.selectedDay || new Date());
+        tzLabel.textContent = abbr || 'local';
+        updateZuluDisplay();
+    } catch (err) {
+        console.warn('Timezone detection failed:', err);
+        appState.departureTimezone = null;
+        tzLabel.textContent = 'local';
+    }
+}
+
+// ============================================================
+// ZULU DISPLAY + FORECAST PERIOD
+// ============================================================
+function updateZuluDisplay() {
+    var input = document.getElementById('depTimeInput');
+    var zuluEl = document.getElementById('depZuluDisplay');
+    var timeVal = (input ? input.value : '').replace(/[^0-9]/g, '');
+
+    if (timeVal.length < 4 || !appState.departureTimezone || !appState.selectedDay) {
+        zuluEl.textContent = '----Z';
+        updateForecastIndicator(null);
+        return;
+    }
+
+    var hrs = parseInt(timeVal.substring(0, 2));
+    var mins = parseInt(timeVal.substring(2, 4));
+    if (hrs > 23 || mins > 59) {
+        zuluEl.textContent = '----Z';
+        updateForecastIndicator(null);
+        return;
+    }
+
+    var info = computeDepartureInfo(timeVal, appState.selectedDay, appState.departureTimezone);
+    appState.departureInfo = info;
+    appState.forecastPeriod = info.forecastPeriod;
+
+    zuluEl.textContent = info.zuluString;
+    updateForecastIndicator(info);
+}
+
+function updateForecastIndicator(info) {
+    var el = document.getElementById('forecastIndicator');
+    if (!el) return;
+
+    if (!info) {
+        el.innerHTML = '';
+        el.style.display = 'none';
+        return;
+    }
+
+    el.style.display = 'block';
+
+    if (info.isPast) {
+        el.innerHTML = '<span class="forecast-warn">⚠ Departure time is in the past</span>';
+    } else if (info.hoursOut > 30) {
+        el.innerHTML = '<span class="forecast-warn">⚠ Beyond 30hr forecast window — winds may be less accurate</span>';
+    } else {
+        el.innerHTML = '<span class="forecast-ok">Using NOAA ' + info.forecastLabel +
+            ' (' + info.hoursOut.toFixed(1) + 'hr out)</span>';
+    }
 }
 
 // ============================================================
@@ -96,7 +254,6 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         dropdown.classList.add('active');
     });
 
-    // Keyboard navigation
     input.addEventListener('keydown', function(e) {
         if (!dropdown.classList.contains('active')) return;
         var items = dropdown.querySelectorAll('.autocomplete-item');
@@ -120,14 +277,12 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         }
     });
 
-    // Close on outside tap
     document.addEventListener('click', function(e) {
         if (!input.contains(e.target) && !dropdown.contains(e.target)) {
             dropdown.classList.remove('active');
         }
     });
 
-    // Also try exact match on blur (user typed full code and tabbed away)
     input.addEventListener('blur', function() {
         setTimeout(function() {
             if (appState.departure && inputId === 'dep-input') return;
@@ -178,53 +333,6 @@ function escHTML(s) {
 }
 
 // ============================================================
-// FORECAST HOUR DETECTION
-// ============================================================
-// Determines which NOAA forecast period to use based on
-// the departure Zulu time vs current Zulu time.
-// NOAA issues forecasts for 06, 12, and 24 hours out.
-// Returns '06', '12', or '24' — or null if no time entered.
-// ============================================================
-function getSelectedForecastHr() {
-    var zuluEl = document.getElementById('depZuluDisplay');
-    if (!zuluEl) return '06';
-
-    var zuluText = zuluEl.textContent.trim();
-    // Expected format: "1430Z" or "----Z" (not set)
-    if (!zuluText || zuluText === '----Z' || zuluText.length < 5) {
-        // No departure time entered — default to 06hr forecast
-        return '06';
-    }
-
-    // Parse the Zulu departure time
-    var zuluDigits = zuluText.replace(/[^0-9]/g, '');
-    if (zuluDigits.length < 4) return '06';
-
-    var depHour = parseInt(zuluDigits.substring(0, 2));
-    var depMin = parseInt(zuluDigits.substring(2, 4));
-
-    // Get current Zulu time
-    var now = new Date();
-    var nowZuluHr = now.getUTCHours();
-    var nowZuluMin = now.getUTCMinutes();
-
-    // Hours from now to departure
-    var depTotalMin = depHour * 60 + depMin;
-    var nowTotalMin = nowZuluHr * 60 + nowZuluMin;
-    var diffMin = depTotalMin - nowTotalMin;
-
-    // If departure is tomorrow (negative diff), add 24 hours
-    if (diffMin < -120) diffMin += 1440;
-
-    var diffHrs = diffMin / 60;
-
-    // Pick the forecast period closest to but >= departure time
-    if (diffHrs <= 9) return '06';
-    if (diffHrs <= 18) return '12';
-    return '24';
-}
-
-// ============================================================
 // CALCULATION
 // ============================================================
 function checkReady() {
@@ -239,21 +347,16 @@ async function runCalculation() {
     var dest = appState.destination;
     var btn = document.getElementById('btn-calc');
 
-    // Show loading state
     btn.disabled = true;
     btn.textContent = 'Calculating...';
     updateStatus('loading', 'Fetching winds aloft...');
     updateWindStatusFooter('loading');
 
     try {
-        // Get forecast period from departure time selector
-        var forecastHr = getSelectedForecastHr();
-
-        // Calculate with wind data (async — fetches NOAA winds)
+        var forecastHr = appState.forecastPeriod || '06';
         var results = await calculateAltitudeOptions(dep, dest, forecastHr);
         appState.lastResults = results;
 
-        // Update status based on wind result
         if (results.windStatus === 'ok') {
             updateStatus('ok', 'Winds loaded (' + results.windStations + ' stations)');
             updateWindStatusFooter('ok', results.windStations);
@@ -288,13 +391,11 @@ function displayResults(results, dep, dest) {
 
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
 
-    // Route summary
     document.getElementById('sum-route').textContent = dep.ident + ' → ' + dest.ident;
     document.getElementById('sum-dist').textContent = Math.round(totalDist);
     document.getElementById('sum-course').textContent = results.trueCourse + '°';
     document.getElementById('sum-dir').textContent = results.direction;
 
-    // Fuel stop check
     var fuelStopEl = document.getElementById('fuel-stop-indicator');
     if (needsFuelStop(results)) {
         fuelStopEl.innerHTML = '<span class="fuel-stop-badge">Fuel Stop Required</span>';
@@ -302,26 +403,25 @@ function displayResults(results, dep, dest) {
         fuelStopEl.innerHTML = '';
     }
 
-    // Wind status bar above altitude table
     var windBar = document.getElementById('wind-status-bar');
-    if (results.windStatus === 'ok') {
-        windBar.innerHTML = '<span class="wind-ok">✓ Winds aloft active — ' +
-            results.windStations + ' station' + (results.windStations > 1 ? 's' : '') +
-            ' along route</span>';
-        windBar.style.display = 'block';
-    } else if (results.windStatus === 'error' || results.windStatus === 'no-stations') {
-        windBar.innerHTML = '<span class="wind-warn">⚠ No wind data — GS = TAS (no correction)</span>';
-        windBar.style.display = 'block';
-    } else {
-        windBar.innerHTML = '';
-        windBar.style.display = 'none';
+    if (windBar) {
+        if (results.windStatus === 'ok') {
+            windBar.innerHTML = '<span class="wind-ok">✓ Winds aloft active — ' +
+                results.windStations + ' station' + (results.windStations > 1 ? 's' : '') +
+                ' along route</span>';
+            windBar.style.display = 'block';
+        } else if (results.windStatus === 'error' || results.windStatus === 'no-stations') {
+            windBar.innerHTML = '<span class="wind-warn">⚠ No wind data — GS = TAS (no correction)</span>';
+            windBar.style.display = 'block';
+        } else {
+            windBar.innerHTML = '';
+            windBar.style.display = 'none';
+        }
     }
 
-    // Altitude options table
     var tbody = document.getElementById('alt-table-body');
     tbody.innerHTML = '';
 
-    // Find best (shortest time) option
     var bestIdx = 0;
     for (var i = 1; i < results.options.length; i++) {
         if (results.options[i].totals.timeMin < results.options[bestIdx].totals.timeMin) {
@@ -334,14 +434,13 @@ function displayResults(results, dep, dest) {
         var tr = document.createElement('tr');
         if (i === bestIdx) tr.className = 'best';
 
-        // Determine if GS differs from TAS (wind correction active)
         var gsText = Math.round(plan.cruise.groundSpeed);
         var gsClass = '';
         if (plan.cruise.wind && plan.cruise.wind.available) {
             if (plan.cruise.wind.windComponent > 0) {
-                gsClass = ' class="gs-headwind"';  // headwind — GS < TAS
+                gsClass = ' class="gs-headwind"';
             } else if (plan.cruise.wind.windComponent < 0) {
-                gsClass = ' class="gs-tailwind"';   // tailwind — GS > TAS
+                gsClass = ' class="gs-tailwind"';
             }
         }
 
@@ -357,17 +456,13 @@ function displayResults(results, dep, dest) {
         tbody.appendChild(tr);
     }
 
-    // Auto-show phase detail for best option
     displayPhaseDetail(results.options[bestIdx]);
-
-    // Scroll to results
     section.scrollIntoView({ behavior: 'smooth' });
 }
 
 function displayPhaseDetail(plan) {
     var el = document.getElementById('phase-detail');
 
-    // Build wind info line for cruise phase
     var windLine = '';
     if (plan.cruise.wind && plan.cruise.wind.available) {
         var w = plan.cruise.wind;
