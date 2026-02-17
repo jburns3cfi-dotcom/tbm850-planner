@@ -22,8 +22,7 @@ function initApp() {
     updateStatus('loading', 'Loading airports...');
 
     var csvUrls = [
-        'data/us-airports.csv',
-        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/data/us-airports.csv',
+        'us-airports.csv',
         'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv',
         'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/main/us-airports.csv'
     ];
