@@ -1,14 +1,19 @@
 // ============================================================
 // APP MODULE — TBM850 Apple Flight Planner
 // UI wiring, state management, event handlers
-// Requires: airports.js, performance.js, route.js, flight-calc.js
+// Requires: airports.js, performance.js, route.js,
+//           flight-calc.js, timezone.js
 // ============================================================
 
 var appState = {
     departure: null,
     destination: null,
-    depTime: null,
-    lastResults: null
+    lastResults: null,
+    // Departure day/time state
+    selectedDayIndex: 0,
+    selectedDayDate: new Date(),
+    departureTimezone: null,
+    departureInfo: null
 };
 
 // ============================================================
@@ -17,8 +22,7 @@ var appState = {
 function initApp() {
     updateStatus('loading', 'Loading airports...');
 
-    initDepTime();
-
+    // CSV lives at root (not data/)
     var csvUrls = [
         'us-airports.csv',
         'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv'
@@ -32,89 +36,27 @@ function initApp() {
         updateStatus('ok', airportDB.length + ' airports loaded');
         setupAutocomplete('dep-input', 'dep-dropdown', 'dep-info', function(apt) {
             appState.departure = apt;
-            updateDepTimezone();
+            if (apt) {
+                resolveDepartureTimezone(apt);
+            } else {
+                appState.departureTimezone = null;
+                updateDepartureDisplay();
+            }
             checkReady();
         });
         setupAutocomplete('dest-input', 'dest-dropdown', 'dest-info', function(apt) {
             appState.destination = apt;
             checkReady();
         });
-
-        document.getElementById('dep-time').addEventListener('change', function() {
-            appState.depTime = this.value || null;
-            updateZuluDisplay();
-            checkReady();
-        });
-
         document.getElementById('btn-calc').addEventListener('click', runCalculation);
+
+        // Initialize departure day/time controls
+        initDaySelector();
+        setupTimeInput();
+
+        // Focus departure field
         document.getElementById('dep-input').focus();
     });
-}
-
-function initDepTime() {
-    var now = new Date();
-    var mins = now.getMinutes();
-    var roundUp = Math.ceil(mins / 15) * 15;
-    if (roundUp >= 60) {
-        now.setHours(now.getHours() + 1);
-        now.setMinutes(0);
-    } else {
-        now.setMinutes(roundUp);
-    }
-    var hh = String(now.getHours()).padStart(2, '0');
-    var mm = String(now.getMinutes()).padStart(2, '0');
-    var timeStr = hh + ':' + mm;
-    document.getElementById('dep-time').value = timeStr;
-    appState.depTime = timeStr;
-}
-
-function updateDepTimezone() {
-    var tzLabel = document.getElementById('dep-tz');
-    if (!appState.departure) {
-        tzLabel.textContent = '';
-        return;
-    }
-    var tz = estimateTimezone(appState.departure.lon);
-    tzLabel.textContent = tz;
-    updateZuluDisplay();
-}
-
-function estimateTimezone(lon) {
-    if (lon > -67.5) return 'AST';
-    if (lon > -82.5) return 'EST';
-    if (lon > -97.5) return 'CST';
-    if (lon > -112.5) return 'MST';
-    if (lon > -127.5) return 'PST';
-    if (lon > -142.5) return 'AKST';
-    return 'HST';
-}
-
-function tzOffsetHours(tz) {
-    var offsets = { 'AST': -4, 'EST': -5, 'CST': -6, 'MST': -7, 'PST': -8, 'AKST': -9, 'HST': -10 };
-    var now = new Date();
-    var jan = new Date(now.getFullYear(), 0, 1);
-    var jul = new Date(now.getFullYear(), 6, 1);
-    var isDST = now.getTimezoneOffset() < Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
-    var base = offsets[tz] || -6;
-    if (isDST && tz !== 'HST' && tz !== 'AST') base += 1;
-    return base;
-}
-
-function updateZuluDisplay() {
-    var zuluEl = document.getElementById('dep-time-zulu');
-    if (!appState.depTime || !appState.departure) {
-        zuluEl.textContent = '';
-        return;
-    }
-    var parts = appState.depTime.split(':');
-    var localHrs = parseInt(parts[0]);
-    var localMins = parseInt(parts[1]);
-    var tz = estimateTimezone(appState.departure.lon);
-    var offset = tzOffsetHours(tz);
-    var zuluHrs = (localHrs - offset + 24) % 24;
-    var zuluStr = String(zuluHrs).padStart(2, '0') + String(localMins).padStart(2, '0') + 'Z';
-    zuluEl.textContent = zuluStr;
-    zuluEl.className = 'airport-info valid';
 }
 
 function tryLoadAirports(urls, idx, callback) {
@@ -130,6 +72,168 @@ function tryLoadAirports(urls, idx, callback) {
             callback(null);
         }
     });
+}
+
+// ============================================================
+// DEPARTURE DAY SELECTOR
+// ============================================================
+function initDaySelector() {
+    var container = document.getElementById('daySelectorRow');
+    if (!container) return;
+
+    var days = getDayOptions(); // from timezone.js
+    container.innerHTML = '';
+
+    days.forEach(function(day, i) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'day-btn' + (i === 0 ? ' active' : '');
+        btn.textContent = day.label;
+        btn.setAttribute('data-index', i);
+
+        btn.addEventListener('click', function() {
+            selectDay(i, day.date);
+        });
+
+        container.appendChild(btn);
+    });
+
+    appState.selectedDayIndex = 0;
+    appState.selectedDayDate = days[0].date;
+}
+
+function selectDay(index, date) {
+    appState.selectedDayIndex = index;
+    appState.selectedDayDate = date;
+
+    var buttons = document.querySelectorAll('.day-btn');
+    buttons.forEach(function(btn, i) {
+        btn.classList.toggle('active', i === index);
+    });
+
+    updateDepartureDisplay();
+}
+
+// ============================================================
+// DEPARTURE TIME INPUT
+// ============================================================
+function setupTimeInput() {
+    var input = document.getElementById('depTimeInput');
+    if (!input) return;
+
+    // Filter to digits only
+    input.addEventListener('input', function(e) {
+        var val = e.target.value.replace(/[^0-9]/g, '');
+        if (val.length > 4) val = val.substring(0, 4);
+        e.target.value = val;
+
+        if (val.length === 4) {
+            var hours = parseInt(val.substring(0, 2));
+            var mins = parseInt(val.substring(2, 4));
+            if (hours <= 23 && mins <= 59) {
+                updateDepartureDisplay();
+            }
+        }
+    });
+
+    input.addEventListener('blur', function() {
+        updateDepartureDisplay();
+    });
+}
+
+// ============================================================
+// DEPARTURE DISPLAY UPDATE
+// Called when day, time, or timezone changes
+// ============================================================
+function updateDepartureDisplay() {
+    var timeInput = document.getElementById('depTimeInput');
+    var zuluDisplay = document.getElementById('depZuluDisplay');
+    var tzLabel = document.getElementById('depTimezoneLabel');
+    var forecastDiv = document.getElementById('forecastIndicator');
+
+    var militaryTime = timeInput ? timeInput.value : '';
+
+    // Need timezone and valid 4-digit time
+    if (!appState.departureTimezone || militaryTime.length < 4) {
+        if (zuluDisplay) zuluDisplay.textContent = '----Z';
+        if (forecastDiv) forecastDiv.innerHTML = '';
+        appState.departureInfo = null;
+        return;
+    }
+
+    // Validate time
+    var hours = parseInt(militaryTime.substring(0, 2));
+    var mins = parseInt(militaryTime.substring(2, 4));
+    if (hours > 23 || mins > 59) {
+        if (zuluDisplay) zuluDisplay.textContent = '----Z';
+        if (forecastDiv) forecastDiv.innerHTML = '';
+        appState.departureInfo = null;
+        return;
+    }
+
+    // Compute departure info (from timezone.js)
+    appState.departureInfo = computeDepartureInfo(
+        militaryTime,
+        appState.selectedDayDate,
+        appState.departureTimezone
+    );
+
+    // Update timezone abbreviation
+    if (tzLabel) {
+        tzLabel.textContent = appState.departureInfo.localAbbr || 'local';
+    }
+
+    // Update Zulu display
+    if (zuluDisplay) {
+        zuluDisplay.textContent = appState.departureInfo.zuluString;
+    }
+
+    // Update forecast indicator
+    if (forecastDiv) {
+        var fc = appState.departureInfo.forecastPeriod;
+        var tagClass = 'forecast-tag fc-' + fc;
+        var label = appState.departureInfo.forecastLabel;
+        var extra = '';
+
+        if (appState.departureInfo.isPast) {
+            tagClass = 'forecast-tag fc-past';
+            label = 'Using Current Winds';
+            extra = ' (departure time is in the past)';
+        } else if (appState.departureInfo.hoursOut > 0) {
+            extra = ' (~' + Math.round(appState.departureInfo.hoursOut) + 'hr out)';
+        }
+
+        forecastDiv.innerHTML =
+            '<span class="' + tagClass + '">' + label + '</span>' + extra;
+    }
+
+    console.log('[DEP] ' + militaryTime + ' ' +
+        (appState.departureInfo.localAbbr || '') + ' → ' +
+        appState.departureInfo.zuluString +
+        ' | Forecast: ' + appState.departureInfo.forecastPeriod +
+        ' | ' + appState.departureInfo.hoursOut + 'hr out');
+}
+
+// ============================================================
+// TIMEZONE RESOLUTION
+// Called when departure airport is selected
+// ============================================================
+async function resolveDepartureTimezone(airport) {
+    var tzLabel = document.getElementById('depTimezoneLabel');
+    if (tzLabel) tzLabel.textContent = '...';
+
+    try {
+        appState.departureTimezone = await getAirportTimezone(
+            airport.ident,
+            airport.lat,
+            airport.lon
+        );
+    } catch (e) {
+        console.warn('[DEP] Timezone resolution failed:', e);
+        appState.departureTimezone = estimateTimezoneFromLon(airport.lon);
+    }
+
+    updateDepartureDisplay();
 }
 
 // ============================================================
@@ -169,6 +273,7 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         dropdown.classList.add('active');
     });
 
+    // Keyboard navigation
     input.addEventListener('keydown', function(e) {
         if (!dropdown.classList.contains('active')) return;
         var items = dropdown.querySelectorAll('.autocomplete-item');
@@ -192,12 +297,14 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         }
     });
 
+    // Close on outside tap
     document.addEventListener('click', function(e) {
         if (!input.contains(e.target) && !dropdown.contains(e.target)) {
             dropdown.classList.remove('active');
         }
     });
 
+    // Try exact match on blur
     input.addEventListener('blur', function() {
         setTimeout(function() {
             if (appState.departure && inputId === 'dep-input') return;
@@ -252,11 +359,11 @@ function escHTML(s) {
 // ============================================================
 function checkReady() {
     var btn = document.getElementById('btn-calc');
-    btn.disabled = !(appState.departure && appState.destination && appState.depTime);
+    btn.disabled = !(appState.departure && appState.destination);
 }
 
 function runCalculation() {
-    if (!appState.departure || !appState.destination || !appState.depTime) return;
+    if (!appState.departure || !appState.destination) return;
 
     var dep = appState.departure;
     var dest = appState.destination;
@@ -276,11 +383,18 @@ function displayResults(results, dep, dest) {
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
 
     // Route summary
-    document.getElementById('sum-route').textContent = dep.ident + ' → ' + dest.ident;
+    document.getElementById('sum-route').textContent = dep.ident + ' \u2192 ' + dest.ident;
     document.getElementById('sum-dist').textContent = Math.round(totalDist);
-    document.getElementById('sum-tc').textContent = results.trueCourse + '°';
-    document.getElementById('sum-mc').textContent = results.magCourse + '°';
+    document.getElementById('sum-course').textContent = results.trueCourse + '\u00B0';
     document.getElementById('sum-dir').textContent = results.direction;
+
+    // Mag course display
+    var magEl = document.getElementById('sum-magcourse');
+    if (magEl) {
+        magEl.textContent = (results.magCourse != null)
+            ? results.magCourse + '\u00B0'
+            : '\u2014';
+    }
 
     // Fuel stop check
     var fuelStopEl = document.getElementById('fuel-stop-indicator');
@@ -294,6 +408,7 @@ function displayResults(results, dep, dest) {
     var tbody = document.getElementById('alt-table-body');
     tbody.innerHTML = '';
 
+    // Find best (shortest time) option
     var bestIdx = 0;
     for (var i = 1; i < results.options.length; i++) {
         if (results.options[i].totals.timeMin < results.options[bestIdx].totals.timeMin) {
@@ -317,7 +432,10 @@ function displayResults(results, dep, dest) {
         tbody.appendChild(tr);
     }
 
+    // Auto-show phase detail for best option
     displayPhaseDetail(results.options[bestIdx]);
+
+    // Scroll to results
     section.scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -329,7 +447,7 @@ function displayPhaseDetail(plan) {
             '<div>Phase</div><div class="phase-value">Time</div>' +
             '<div class="phase-value">Fuel</div><div class="phase-value">Dist</div>' +
         '</div>' +
-        phaseRow('Taxi', '—', plan.totals.taxiFuel + 'g', '—') +
+        phaseRow('Taxi', '\u2014', plan.totals.taxiFuel + 'g', '\u2014') +
         phaseRow('Climb', formatTime(plan.climb.timeMin), plan.climb.fuelGal + 'g', plan.climb.distanceNM + 'nm') +
         phaseRow('Cruise', formatTime(plan.cruise.timeMin), plan.cruise.fuelGal + 'g', plan.cruise.distanceNM + 'nm') +
         phaseRow('Descent', formatTime(plan.descent.timeMin), plan.descent.fuelGal + 'g', plan.descent.distanceNM + 'nm') +
