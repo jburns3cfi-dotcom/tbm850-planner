@@ -7,6 +7,109 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>TBM850 Flight Planner</title>
     <link rel="stylesheet" href="css/planner.css">
+    <style>
+        /* Day-of-week pills */
+        .dow-row {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        .dow-pill {
+            flex: 1;
+            min-width: 44px;
+            padding: 8px 4px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-label);
+            font-size: 0.72rem;
+            text-align: center;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+            transition: background 0.15s, color 0.15s, border-color 0.15s;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .dow-pill.active {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+            font-weight: 600;
+        }
+        .dow-pill .dow-day {
+            font-weight: 600;
+            font-size: 0.8rem;
+            display: block;
+        }
+        .dow-pill .dow-date {
+            font-size: 0.65rem;
+            opacity: 0.7;
+        }
+        .dow-pill.active .dow-date {
+            opacity: 0.9;
+        }
+
+        /* Departure time row */
+        .dep-time-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .dep-time-row label {
+            font-size: 0.75rem;
+            color: var(--text-label);
+            white-space: nowrap;
+        }
+        .dep-time-row input[type="time"] {
+            font-size: 1rem;
+            padding: 6px 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text);
+            -webkit-appearance: none;
+            width: 120px;
+        }
+        .dep-time-row .zulu-display {
+            font-size: 0.75rem;
+            color: var(--text-label);
+            font-family: 'SF Mono', 'Menlo', monospace;
+        }
+
+        /* Wind source indicator */
+        .wind-source {
+            font-size: 0.7rem;
+            color: var(--text-label);
+            margin-top: 6px;
+            font-family: 'SF Mono', 'Menlo', monospace;
+        }
+
+        /* Wind annotation in phase detail */
+        .wind-annotation {
+            font-size: 0.7rem;
+            color: var(--text-label);
+            font-style: italic;
+        }
+
+        /* Phase warning banner */
+        .phase-warning {
+            background: #fef3cd;
+            color: #856404;
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        @media (prefers-color-scheme: dark) {
+            .phase-warning {
+                background: #332b00;
+                color: #ffc107;
+            }
+        }
+    </style>
 </head>
 <body>
 
@@ -37,18 +140,15 @@
             </div>
         </div>
 
-        <!-- Day & Time Selector -->
-        <div class="input-group">
-            <label>Departure Day &amp; Time (Local)</label>
-            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                <div id="day-pills" style="display:flex; gap:4px; flex-wrap:wrap;"></div>
-                <input type="text" id="dep-time" placeholder="1430" maxlength="4" inputmode="numeric"
-                       style="width:80px; text-align:center; font-size:1rem; padding:8px;">
-                <span style="color:var(--text-label); font-size:0.8rem;">local</span>
-                <span style="color:var(--text-label); font-size:0.8rem;">&rarr;</span>
-                <span id="zulu-display" style="font-family:var(--font-mono); color:var(--accent-blue); font-size:0.95rem;">----Z</span>
-                <span id="forecast-indicator" class="forecast-badge forecast-ok" style="margin-left:auto;"></span>
-            </div>
+        <!-- Day of Week Pills -->
+        <label style="font-size:0.75rem;color:var(--text-label);margin-bottom:4px;display:block;">Departure Day</label>
+        <div id="dow-pills" class="dow-row"></div>
+
+        <!-- Departure Time -->
+        <div class="dep-time-row">
+            <label for="dep-time">Departure (local):</label>
+            <input type="time" id="dep-time" value="09:00">
+            <span id="zulu-display" class="zulu-display">—Z</span>
         </div>
 
         <button id="btn-calc" class="btn-calculate" disabled>Calculate Flight Plan</button>
@@ -70,24 +170,16 @@
                     <div class="label">True Course</div>
                 </div>
                 <div class="summary-item">
-                    <div class="value" id="sum-mag-course">—</div>
-                    <div class="label">Mag Course</div>
-                </div>
-                <div class="summary-item">
                     <div class="value" id="sum-dir">—</div>
                     <div class="label">Direction</div>
                 </div>
             </div>
+            <div id="wind-source" class="wind-source" style="display:none;"></div>
             <div id="fuel-stop-indicator"></div>
         </div>
 
         <!-- Altitude Options -->
         <div class="card">
-            <!-- Wind status bar at top of altitude card -->
-            <div id="wind-status-bar" class="wind-status-bar" style="display:none;">
-                <span class="status-dot"></span>
-                <span>No wind data</span>
-            </div>
             <div class="card-title">Altitude Options <span style="font-size:0.65rem;color:var(--text-label);font-weight:400;">(tap row for detail)</span></div>
             <table class="alt-table">
                 <thead>
@@ -119,16 +211,13 @@
         <span id="status-dot" class="status-dot loading"></span>
         <span id="status-text">Initializing...</span>
     </div>
-    <div id="wind-status-footer" class="wind-status-footer">
-        <span class="wind-none">No wind correction</span>
-    </div>
+    <div id="status-wind">No wind correction</div>
 </div>
 
 <!-- Load modules in dependency order -->
 <script src="js/airports.js"></script>
 <script src="js/performance.js"></script>
 <script src="js/route.js"></script>
-<script src="js/winds.js"></script>
 <script src="js/gfs-winds.js"></script>
 <script src="js/flight-calc.js"></script>
 <script src="js/app.js"></script>
