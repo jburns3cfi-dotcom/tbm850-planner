@@ -638,6 +638,7 @@ function getWindSummary(routeWindData, cruiseAlt, trueCourse, tas) {
         gs: effectiveGS,
         windComponent: avgHeadwind,
         stationCount: validStations.length,
-        description: desc
+        description: desc,
+        source: 'NOAA'
     };
 }

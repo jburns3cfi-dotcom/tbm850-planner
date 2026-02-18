@@ -322,12 +322,14 @@ async function runCalculation() {
 
     try {
         // Async call — fetches winds and calculates
-        var results = await calculateAltitudeOptions(dep, dest, appState.forecastHr);
+        var depDateTime = getDepDateTime(); // local Date — JS handles UTC internally
+        var results = await calculateAltitudeOptions(dep, dest, appState.forecastHr, depDateTime);
         appState.lastResults = results;
 
         // Update wind status
         if (results.windStatus === 'ok') {
-            updateWindStatus('ok', 'Winds applied (' + results.windStationCount + ' stations)');
+            var label = results.windSource === 'GFS' ? 'grid pts' : 'stations';
+            updateWindStatus('ok', 'Winds applied (' + results.windStationCount + ' ' + label + ')');
         } else if (results.windStatus === 'failed') {
             updateWindStatus('warn', 'Wind fetch failed — using TAS only');
         } else {
@@ -432,7 +434,7 @@ function displayPhaseDetail(plan) {
             '<span class="wind-arrow">' + windArrow + '</span>' +
             '<span class="wind-value">' + plan.windSummary.description + '</span>' +
             ' · GS ' + plan.windSummary.gs + 'kt' +
-            ' (' + plan.windSummary.stationCount + ' stn)' +
+            ' (' + plan.windSummary.stationCount + ' ' + (plan.windSummary.source && plan.windSummary.source.indexOf('GFS') === 0 ? 'pts' : 'stn') + ')' +
             '</div>';
     }
 

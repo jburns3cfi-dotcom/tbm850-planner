@@ -59,8 +59,9 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
 // Calculates all 4 valid altitudes for the course direction,
 // fetches winds aloft, applies GS correction, returns best 3.
 // forecastHr: '06', '12', or '24' — NOAA forecast period
+// departureTimeZ: Date object or ISO string in UTC for GFS forecast hour
 // ============================================================
-async function calculateAltitudeOptions(dep, dest, forecastHr) {
+async function calculateAltitudeOptions(dep, dest, forecastHr, departureTimeZ) {
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
     var magCourse = trueCourse; // Will be corrected if getMagneticVariation exists
     if (typeof getMagneticVariation === 'function') {
@@ -73,26 +74,59 @@ async function calculateAltitudeOptions(dep, dest, forecastHr) {
     // Get all valid altitudes (4 for the direction), not just top 3
     var allAltitudes = getValidAltitudes(trueCourse, 24000, 31000);
 
-    // Fetch winds aloft
+    // ── WIND DATA FETCH ──────────────────────────────────
+    // Try GFS gridded data first (more accurate), fall back to
+    // NOAA station-based winds if GFS fails.
     var windData = null;
+    var gfsData = null;
+    var windSource = 'none';
     var windStatus = 'none';
-    if (forecastHr) {
+    var windPointCount = 0;
+
+    // Attempt 1: GFS gridded winds
+    if (typeof fetchGFSWinds === 'function') {
         try {
-            windData = await fetchRouteWinds(dep, dest, forecastHr);
-            windStatus = windData ? 'ok' : 'failed';
+            console.log('[CALC] Attempting GFS gridded wind fetch...');
+            gfsData = await fetchGFSWinds(dep, dest, departureTimeZ);
+            if (gfsData && gfsData.waypoints && gfsData.waypoints.length >= 3) {
+                windSource = 'GFS';
+                windStatus = 'ok';
+                windPointCount = gfsData.pointCount;
+                console.log('[CALC] GFS wind data available — ' + gfsData.pointCount + ' grid points');
+            } else {
+                console.warn('[CALC] GFS returned insufficient data, falling back to station winds');
+                gfsData = null;
+            }
         } catch (err) {
-            console.error('[CALC] Wind fetch error:', err);
+            console.warn('[CALC] GFS fetch failed: ' + err.message + ' — falling back to station winds');
+            gfsData = null;
+        }
+    }
+
+    // Attempt 2: NOAA station-based winds (fallback)
+    if (!gfsData && forecastHr && typeof fetchRouteWinds === 'function') {
+        try {
+            console.log('[CALC] Falling back to station-based wind fetch...');
+            windData = await fetchRouteWinds(dep, dest, forecastHr);
+            if (windData) {
+                windSource = 'NOAA';
+                windStatus = 'ok';
+                windPointCount = windData.stationList ? windData.stationList.length : 0;
+                console.log('[CALC] Station wind data available — ' + windPointCount + ' stations');
+            } else {
+                windStatus = 'failed';
+            }
+        } catch (err) {
+            console.error('[CALC] Station wind fetch error:', err);
             windStatus = 'failed';
         }
     }
 
-    if (windData) {
-        console.log('[CALC] Wind data available — applying GS corrections');
-    } else {
+    if (!gfsData && !windData) {
         console.log('[CALC] No wind data — using TAS for ground speed');
     }
 
-    // Calculate flight plan for each altitude
+    // ── CALCULATE FLIGHT PLANS ───────────────────────────
     var options = [];
     for (var i = 0; i < allAltitudes.length; i++) {
         var alt = allAltitudes[i];
@@ -104,7 +138,13 @@ async function calculateAltitudeOptions(dep, dest, forecastHr) {
         // Calculate wind-corrected ground speed
         var gs = null;
         var windSummary = null;
-        if (windData) {
+
+        if (gfsData) {
+            // GFS gridded winds
+            gs = calculateGFSGroundSpeed(gfsData, alt, trueCourse, tas);
+            windSummary = getGFSWindSummary(gfsData, alt, trueCourse, tas);
+        } else if (windData) {
+            // Station-based winds (fallback)
             gs = calculateGroundSpeed(windData, alt, trueCourse, tas);
             windSummary = getWindSummary(windData, alt, trueCourse, tas);
         }
@@ -127,7 +167,8 @@ async function calculateAltitudeOptions(dep, dest, forecastHr) {
         magCourse: Math.round(magCourse),
         direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
         windStatus: windStatus,
-        windStationCount: windData ? windData.stationList.length : 0,
+        windSource: windSource,
+        windStationCount: windPointCount,
         options: best3
     };
 }
