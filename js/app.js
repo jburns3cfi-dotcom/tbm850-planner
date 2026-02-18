@@ -44,7 +44,7 @@ function initApp() {
 
         var depTimeInput = document.getElementById('dep-time');
         if (depTimeInput) {
-            depTimeInput.addEventListener('change', updateZuluDisplay);
+            depTimeInput.addEventListener('input', updateZuluDisplay);
             updateZuluDisplay();
         }
 
@@ -120,9 +120,13 @@ function getDepartureTimeZulu() {
     var timeInput = document.getElementById('dep-time');
     if (!timeInput || !timeInput.value) return null;
 
-    var parts = timeInput.value.split(':');
-    var hours = parseInt(parts[0]);
-    var mins = parseInt(parts[1]) || 0;
+    var raw = timeInput.value.replace(/[^0-9]/g, '');
+    if (raw.length < 3 || raw.length > 4) return null;
+    if (raw.length === 3) raw = '0' + raw; // "900" → "0900"
+
+    var hours = parseInt(raw.substring(0, 2));
+    var mins = parseInt(raw.substring(2, 4));
+    if (hours > 23 || mins > 59) return null;
 
     var today = new Date();
     var depDate = new Date(today);
