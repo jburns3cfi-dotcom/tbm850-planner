@@ -1,11 +1,10 @@
 // ============================================================
 // fuel-stops.js — TBM850 Fuel Stop Candidate Finder + Pricing
 // Must load BEFORE app.js in index.html
-// VERSION CHECK: Look for "[FuelStops] v3 loaded" in console
 // ============================================================
-console.log('[FuelStops] v3 loaded — CORS proxy + flexible lookup');
+console.log('[FuelStops] v5 loaded — CAA via proxy, AirNav direct');
 
-const FuelStops = (() => {
+var FuelStops = (function() {
     'use strict';
 
     // ----- Internal state -----
@@ -14,24 +13,22 @@ const FuelStops = (() => {
     var lastCandidates = [];
     var fuelCache = {};
 
-    // ----- Constants -----
+    // ----- URLs -----
+    // CAA worker has doubled CORS header — route through proxy (now on allowed list)
+    // AirNav worker has clean CORS — call directly
     var PROXY = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
     var CAA_URL = PROXY + encodeURIComponent('https://caa-fuel.jburns3cfi.workers.dev');
-    var AIRNAV_BASE = 'https://airnav-grab.jburns3cfi.workers.dev';
+    var AIRNAV_URL = 'https://airnav-grab.jburns3cfi.workers.dev';
     var CORRIDOR_NM = 30;
     var MIN_FROM_DEP_NM = 200;
     var DESCENT_BUFFER_NM = 60;
 
     // =========================================================
-    // AUTO-FETCH CAA DATA ON SCRIPT LOAD (through proxy)
+    // AUTO-FETCH CAA DATA ON SCRIPT LOAD
     // =========================================================
     (function autoFetchCAA() {
-        console.log('[FuelStops] Fetching CAA via proxy:', CAA_URL);
         fetch(CAA_URL)
-            .then(function(r) {
-                console.log('[FuelStops] CAA response status:', r.status);
-                return r.json();
-            })
+            .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.success && data.airports) {
                     caaData = data.airports;
@@ -49,11 +46,11 @@ const FuelStops = (() => {
                     }
                     console.log('[FuelStops] CAA data loaded: ' + data.count + ' airports');
                     enhanceFuelTable();
-                } else {
-                    console.warn('[FuelStops] CAA response unexpected:', JSON.stringify(data).substring(0, 200));
                 }
             })
-            .catch(function(err) { console.warn('[FuelStops] CAA fetch failed:', err); });
+            .catch(function(err) {
+                console.warn('[FuelStops] CAA fetch failed:', err.message || err);
+            });
     })();
 
     // =========================================================
@@ -124,10 +121,6 @@ const FuelStops = (() => {
     // findCandidates — SYNCHRONOUS (app.js calls without await)
     // =========================================================
     function findCandidates(dep, dest, totalDist) {
-        console.log('[FuelStops] findCandidates called — dep type=' + typeof dep + ', dest type=' + typeof dest);
-        console.log('[FuelStops] dep raw value:', dep);
-        console.log('[FuelStops] dest raw value:', dest);
-
         if (typeof airportDB === 'undefined' || !airportDB || airportDB.length === 0) {
             console.warn('[FuelStops] airportDB not loaded yet');
             return [];
@@ -135,7 +128,7 @@ const FuelStops = (() => {
 
         var depIdent = resolveIdent(dep);
         var destIdent = resolveIdent(dest);
-        console.log('[FuelStops] Resolved: ' + depIdent + ' -> ' + destIdent);
+        console.log('[FuelStops] Searching candidates: ' + depIdent + ' -> ' + destIdent + ', totalDist=' + totalDist);
 
         var depApt = findAirport(depIdent);
         var destApt = findAirport(destIdent);
@@ -143,21 +136,7 @@ const FuelStops = (() => {
         if (!depApt || !destApt) {
             console.warn('[FuelStops] LOOKUP FAILED — dep=' + depIdent + ' found=' + !!depApt + ', dest=' + destIdent + ' found=' + !!destApt);
             if (airportDB.length > 0) {
-                var sample = airportDB[0];
-                console.warn('[FuelStops] airportDB[0] keys: ' + Object.keys(sample).join(', '));
-                console.warn('[FuelStops] airportDB[0] ident=' + sample.ident + ', icao=' + sample.icao + ', gps_code=' + sample.gps_code);
-                // Brute-force search
-                for (var s = 0; s < airportDB.length; s++) {
-                    var vals = Object.values(airportDB[s]);
-                    for (var v = 0; v < vals.length; v++) {
-                        if (String(vals[v]).toUpperCase() === depIdent) {
-                            console.warn('[FuelStops] Found ' + depIdent + ' at index ' + s + ' via field scan');
-                            console.warn('[FuelStops] Entry:', JSON.stringify(airportDB[s]).substring(0, 300));
-                            break;
-                        }
-                    }
-                    if (String(vals[v]).toUpperCase() === depIdent) break; // stop outer loop too
-                }
+                console.warn('[FuelStops] airportDB[0] keys: ' + Object.keys(airportDB[0]).join(', '));
             }
             return [];
         }
@@ -166,7 +145,6 @@ const FuelStops = (() => {
         var depLon = getLon(depApt);
         var destLat = getLat(destApt);
         var destLon = getLon(destApt);
-        console.log('[FuelStops] Coords — dep: ' + depLat + ',' + depLon + ' dest: ' + destLat + ',' + destLon);
 
         var inCorridor = [];
         for (var i = 0; i < airportDB.length; i++) {
@@ -218,7 +196,7 @@ const FuelStops = (() => {
         });
 
         var results = inCorridor.slice(0, 8);
-        console.log('[FuelStops] Found ' + results.length + ' candidates from ' + inCorridor.length + ' in corridor');
+        console.log('[FuelStops] Found ' + results.length + ' fuel stop candidates from ' + inCorridor.length + ' in corridor');
 
         lastCandidates = results;
         setTimeout(function() { enhanceFuelTable(); }, 200);
@@ -227,12 +205,11 @@ const FuelStops = (() => {
     }
 
     // =========================================================
-    // FUEL DATA FETCHING
+    // FUEL DATA FETCHING — AirNav called DIRECTLY (no proxy)
     // =========================================================
     function fetchAirNavFuel(ident) {
         if (fuelCache[ident]) return Promise.resolve(fuelCache[ident]);
-        var url = PROXY + encodeURIComponent(AIRNAV_BASE + '?id=' + ident);
-        return fetch(url)
+        return fetch(AIRNAV_URL + '?id=' + ident)
             .then(function(resp) { return resp.json(); })
             .then(function(data) {
                 if (data.jetA && data.jetA.price) {
@@ -250,7 +227,7 @@ const FuelStops = (() => {
                 return null;
             })
             .catch(function(err) {
-                console.warn('[FuelStops] AirNav failed for ' + ident + ':', err);
+                console.warn('[FuelStops] AirNav failed for ' + ident + ':', err.message || err);
                 return null;
             });
     }
