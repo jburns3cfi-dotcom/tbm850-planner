@@ -672,7 +672,7 @@ const FuelStops = (() => {
         <td style="padding:6px 5px;white-space:nowrap;">
           <strong style="font-size:14px;">${opt.icao}</strong><br>
           <span style="font-size:11px;color:#374151;">${opt.stop.airport.name}</span><br>
-          <span style="font-size:11px;color:#6b7280;">${cityRegion}</span>
+          <span style="font-size:11px;color:#4b5563;">${cityRegion}</span>
         </td>
         <td style="padding:6px 5px;text-align:center;">${caaBadge}</td>
         <td style="padding:6px 5px;font-size:12px;color:#1f2937;max-width:130px;overflow:hidden;text-overflow:ellipsis;">${opt.fbo || '—'}</td>
@@ -696,7 +696,7 @@ const FuelStops = (() => {
 
         html += `<tr style="background:${bg};border-bottom:1px solid #f1f5f9;">
           <td style="padding:2px 4px;"></td>
-          <td style="padding:2px 5px;color:#6b7280;font-size:11px;">↳ alt option</td>
+          <td style="padding:2px 5px;color:#4b5563;font-size:11px;">↳ alt option</td>
           <td style="padding:2px 5px;"></td>
           <td style="padding:2px 5px;"></td>
           <td style="padding:2px 5px;"></td>
@@ -878,7 +878,7 @@ const FuelStops = (() => {
   function formatPriceCell(icao, fuelData) {
     if (fuelData && fuelData.caaPrice) {
       return `<strong style="color:#16a34a;">$${fuelData.caaPrice.toFixed(2)}</strong> ` +
-        `<span style="text-decoration:line-through;color:#6b7280;font-size:11px;">$${fuelData.retailPrice.toFixed(2)}</span>`;
+        `<span style="text-decoration:line-through;color:#374151;font-size:11px;">$${fuelData.retailPrice.toFixed(2)}</span>`;
     }
     if (fuelData && fuelData.retailPrice) {
       return `<strong style="color:#1f2937;">$${fuelData.retailPrice.toFixed(2)}</strong>`;
