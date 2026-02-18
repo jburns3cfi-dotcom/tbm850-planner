@@ -16,6 +16,7 @@ const FuelStops = (() => {
   const MIN_LANDING_GAL = 75;
   const FUEL_STOP_TRIGGER_HRS = 3.5;
   const CORRIDOR_WIDTH_NM = 30;
+  const CAA_CORRIDOR_WIDTH_NM = 50;    // Wider corridor for CAA airports
   const MIN_STOP_SPACING_NM = 200;
   const DESCENT_BUFFER_NM = 60;
   const FUEL_HOUR1 = 75;
@@ -341,7 +342,9 @@ const FuelStops = (() => {
       if (ident === depIdent || ident === destIdent) continue;
 
       const xtDist = crossTrackDist(lat, lon, depLat, depLon, destLat, destLon);
-      if (xtDist > CORRIDOR_WIDTH_NM) continue;
+      const aptIsCaa = isCAA(ident);
+      const corridorLimit = aptIsCaa ? CAA_CORRIDOR_WIDTH_NM : CORRIDOR_WIDTH_NM;
+      if (xtDist > corridorLimit) continue;
 
       const atDist = alongTrackDist(lat, lon, depLat, depLon, destLat, destLon);
       if (atDist < 0 || atDist > routeDist) continue;
@@ -362,7 +365,7 @@ const FuelStops = (() => {
         distFromDest: Math.round(routeDist - atDist),
         distOffRoute: Math.round(xtDist * 10) / 10,
         type: apt.type,
-        isCaa: isCAA(ident)
+        isCaa: aptIsCaa
       });
     }
 
@@ -374,7 +377,8 @@ const FuelStops = (() => {
 
     const results = candidates.slice(0, 8);
     lastCandidates = results;
-    console.log(`[FuelStops] Found ${results.length} fuel stop candidates from ${corridorCount} in corridor`);
+    const caaCount = results.filter(c => c.isCaa).length;
+    console.log(`[FuelStops] Found ${results.length} fuel stop candidates (${caaCount} CAA) from ${corridorCount} in corridor`);
 
     // Run ranking analysis after app.js renders
     setTimeout(() => runRankingAnalysis(), 250);
@@ -627,9 +631,10 @@ const FuelStops = (() => {
           <tr style="background:#1e3a5f;color:#fff;">
             <th style="padding:6px 4px;text-align:center;width:32px;"></th>
             <th style="padding:6px 5px;text-align:left;">FUEL STOP</th>
-            <th style="padding:6px 5px;text-align:right;">FROM DEP</th>
+            <th style="padding:6px 5px;text-align:center;">CAA</th>
             <th style="padding:6px 5px;text-align:left;">FBO</th>
             <th style="padding:6px 5px;text-align:right;">JET A $/GAL</th>
+            <th style="padding:6px 5px;text-align:right;">FROM DEP</th>
             <th style="padding:6px 5px;text-align:center;">ALT</th>
             <th style="padding:6px 5px;text-align:right;">TIME</th>
             <th style="padding:6px 5px;text-align:right;">COST</th>
@@ -654,7 +659,7 @@ const FuelStops = (() => {
       const bg = idx % 2 === 0 ? '#f8fafc' : '#ffffff';
 
       const caaBadge = opt.isCaa
-        ? ' <span style="background:#22c55e;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;vertical-align:middle;">CAA</span>' : '';
+        ? '<span style="background:#22c55e;color:#fff;font-size:10px;padding:2px 6px;border-radius:3px;font-weight:700;">CAA</span>' : '';
 
       const priceHtml = formatPriceCell(opt.icao, opt.fuelData);
       const region = (opt.stop.airport.region || '').replace('US-', '');
@@ -665,13 +670,14 @@ const FuelStops = (() => {
       html += `<tr style="background:${bg};border-bottom:1px solid #e2e8f0;">
         <td style="padding:6px 4px;text-align:center;font-size:16px;">${rankIcon}</td>
         <td style="padding:6px 5px;white-space:nowrap;">
-          <strong style="font-size:14px;">${opt.icao}</strong>${caaBadge}<br>
+          <strong style="font-size:14px;">${opt.icao}</strong><br>
           <span style="font-size:11px;color:#374151;">${opt.stop.airport.name}</span><br>
           <span style="font-size:11px;color:#6b7280;">${cityRegion}</span>
         </td>
-        <td style="padding:6px 5px;text-align:right;color:#374151;white-space:nowrap;">${opt.stop.distFromDep}nm</td>
-        <td style="padding:6px 5px;font-size:12px;color:#1f2937;max-width:120px;overflow:hidden;text-overflow:ellipsis;">${opt.fbo || '—'}</td>
+        <td style="padding:6px 5px;text-align:center;">${caaBadge}</td>
+        <td style="padding:6px 5px;font-size:12px;color:#1f2937;max-width:130px;overflow:hidden;text-overflow:ellipsis;">${opt.fbo || '—'}</td>
         <td style="padding:6px 5px;text-align:right;white-space:nowrap;">${priceHtml}</td>
+        <td style="padding:6px 5px;text-align:right;color:#374151;white-space:nowrap;">${opt.stop.distFromDep}nm</td>
         <td style="padding:6px 5px;text-align:center;color:#1f2937;">${opt.altitude}</td>
         <td style="padding:6px 5px;text-align:right;color:#1f2937;">${formatTime(opt.totalTime)}</td>
         <td style="padding:6px 5px;text-align:right;"><strong>$${opt.totalCost.toFixed(0)}</strong></td>
@@ -693,7 +699,8 @@ const FuelStops = (() => {
           <td style="padding:2px 5px;color:#6b7280;font-size:11px;">↳ alt option</td>
           <td style="padding:2px 5px;"></td>
           <td style="padding:2px 5px;"></td>
-          <td style="padding:2px 5px;text-align:right;font-size:12px;color:#4b5563;">${priceHtml}</td>
+          <td style="padding:2px 5px;"></td>
+          <td style="padding:2px 5px;"></td>
           <td style="padding:2px 5px;text-align:center;font-size:13px;color:#1f2937;">${altOpt.altitude}</td>
           <td style="padding:2px 5px;text-align:right;font-size:13px;color:#1f2937;">${formatTime(altOpt.totalTime)}</td>
           <td style="padding:2px 5px;text-align:right;font-size:13px;color:#1f2937;">$${altOpt.totalCost.toFixed(0)}</td>
@@ -842,9 +849,10 @@ const FuelStops = (() => {
 
       const icao = candidate.airport.ident;
       if (candidate.isCaa && caaAirports && caaAirports[icao]) {
-        const caa = caaAirports[icao];
-        tdPrice.innerHTML = formatPriceCell(icao, getCAAData(icao));
-        tdFBO.textContent = caa.fbo || '';
+        const caaData = getCAAData(icao);
+        tdPrice.innerHTML = `<span style="background:#22c55e;color:#fff;font-size:10px;padding:1px 4px;border-radius:3px;margin-right:3px;">CAA</span>` +
+          formatPriceCell(icao, caaData);
+        tdFBO.textContent = caaData ? caaData.fbo : '';
       } else {
         tdPrice.textContent = 'loading…';
         fetchAirNavFuel(icao).then(fuel => {
@@ -869,8 +877,7 @@ const FuelStops = (() => {
 
   function formatPriceCell(icao, fuelData) {
     if (fuelData && fuelData.caaPrice) {
-      return `<span style="background:#22c55e;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-right:3px;">CAA</span>` +
-        `<strong style="color:#16a34a;">$${fuelData.caaPrice.toFixed(2)}</strong> ` +
+      return `<strong style="color:#16a34a;">$${fuelData.caaPrice.toFixed(2)}</strong> ` +
         `<span style="text-decoration:line-through;color:#6b7280;font-size:11px;">$${fuelData.retailPrice.toFixed(2)}</span>`;
     }
     if (fuelData && fuelData.retailPrice) {
