@@ -7,7 +7,7 @@
 var WindsAloft = (function () {
 
     var PROXY_BASE = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
-    var NOAA_BASE = 'https://aviationweather.gov/cgi-bin/data/windtemp.php';
+    var NOAA_BASE = 'https://aviationweather.gov/api/data/windtemp';
 
     // Cache: keyed by "region-level-hours"
     var cache = {};
@@ -61,7 +61,9 @@ var WindsAloft = (function () {
             return Promise.resolve(cache[key]);
         }
 
-        var noaaUrl = NOAA_BASE + '?region=' + region + '&fcst=' + fcstHours + '&level=' + level;
+        // New API params: region=us, level=low/high, fcst=6/12/24, layout=off
+        var levelParam = level === 'hi' ? 'high' : 'low';
+        var noaaUrl = NOAA_BASE + '?region=us&level=' + levelParam + '&fcst=' + fcstHours + '&layout=off';
         var proxyUrl = PROXY_BASE + encodeURIComponent(noaaUrl);
 
         return fetch(proxyUrl)
@@ -112,7 +114,9 @@ var WindsAloft = (function () {
             if (!line) continue;
 
             // Look for the header line with altitude columns
-            if (line.match(/^STN/) || line.match(/^Station/i)) {
+            // Old format: "STN    3000    6000    9000..."
+            // New format: "FT  3000    6000    9000..."
+            if (line.match(/^STN/) || line.match(/^Station/i) || line.match(/^FT\s/)) {
                 // Parse altitude headers
                 // Format: "STN    3000    6000    9000    12000   18000   24000   30000   34000   39000"
                 var parts = line.split(/\s+/);
@@ -136,6 +140,7 @@ var WindsAloft = (function () {
             if (line.match(/^-+/) || line.match(/^=+/)) continue;
 
             // Data lines: "ORD 2714 2725+03 2735+00 2745-07 2760-18 2770-31 278945 287952 289060"
+            // Some stations skip low altitudes (e.g. no 3000ft entry)
             var match = line.match(/^([A-Z]{3})\s+(.+)/);
             if (!match) continue;
 
@@ -146,10 +151,17 @@ var WindsAloft = (function () {
             var entries = windStr.split(/\s+/);
             data[station] = {};
 
-            for (var k = 0; k < Math.min(entries.length, altitudes.length); k++) {
+            // If fewer entries than altitudes, missing ones are at the BEGINNING
+            // (low altitudes are often omitted). Right-align entries to altitudes.
+            var offset = altitudes.length - entries.length;
+            if (offset < 0) offset = 0;
+
+            for (var k = 0; k < entries.length; k++) {
+                var altIdx = k + offset;
+                if (altIdx >= altitudes.length) break;
                 var decoded = decodeWindEntry(entries[k]);
                 if (decoded) {
-                    data[station][altitudes[k]] = decoded;
+                    data[station][altitudes[altIdx]] = decoded;
                 }
             }
         }
