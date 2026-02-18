@@ -25,6 +25,21 @@ const DepartureTime = (function () {
     let selectedDayOffset = 0;   // 0 = today, 1 = tomorrow, etc.
 
     /**
+     * Parse a 4-digit military time string (e.g. "1430", "0200", "2359").
+     * Returns { hours, minutes } or null if invalid.
+     */
+    function parseMilitaryTime(val) {
+        if (!val) return null;
+        // Strip anything that's not a digit
+        var digits = val.replace(/\D/g, '');
+        if (digits.length !== 4) return null;
+        var h = parseInt(digits.substring(0, 2), 10);
+        var m = parseInt(digits.substring(2, 4), 10);
+        if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+        return { hours: h, minutes: m };
+    }
+
+    /**
      * Initialize the departure time UI.
      * Call once after the DOM elements exist.
      */
@@ -41,7 +56,13 @@ const DepartureTime = (function () {
         setDefaultTime();
 
         // Listen for time input changes
-        timeInput.addEventListener('input', onTimeChange);
+        timeInput.addEventListener('input', function() {
+            // Strip non-digits, enforce max 4 chars
+            var clean = timeInput.value.replace(/\D/g, '');
+            if (clean.length > 4) clean = clean.substring(0, 4);
+            if (clean !== timeInput.value) timeInput.value = clean;
+            onTimeChange();
+        });
         timeInput.addEventListener('change', onTimeChange);
 
         // Build initial day pills (uses browser's local timezone until airport is set)
@@ -103,7 +124,7 @@ const DepartureTime = (function () {
 
         const timeInput = document.getElementById('departure-time-input');
         if (timeInput) {
-            timeInput.value = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+            timeInput.value = String(h).padStart(2, '0') + String(m).padStart(2, '0');
         }
     }
 
@@ -189,18 +210,21 @@ const DepartureTime = (function () {
             return;
         }
 
-        const [hours, minutes] = timeInput.value.split(':').map(Number);
-        if (isNaN(hours) || isNaN(minutes)) {
-            zuluLine.textContent = 'Invalid time';
+        const parsed = parseMilitaryTime(timeInput.value);
+        if (!parsed) {
+            zuluLine.textContent = timeInput.value.length < 4 ? 'Enter 4 digits (e.g. 1430)' : 'Invalid time';
             return;
         }
+
+        const hours = parsed.hours;
+        const minutes = parsed.minutes;
 
         // Get the selected date
         const dateInfo = getSelectedDate();
 
         if (!currentTimezone) {
             // No airport set yet — show time but note no timezone
-            zuluLine.textContent = `${String(hours).padStart(2, '0')}${String(minutes).padStart(2, '0')}L — select departure airport for Zulu`;
+            zuluLine.textContent = `${String(hours).padStart(2, '0')}${String(minutes).padStart(2, '0')}L \u2014 select departure airport for Zulu`;
             return;
         }
 
@@ -280,7 +304,11 @@ const DepartureTime = (function () {
         const timeInput = document.getElementById('departure-time-input');
         if (!timeInput || !timeInput.value) return null;
 
-        const [hours, minutes] = timeInput.value.split(':').map(Number);
+        const parsed = parseMilitaryTime(timeInput.value);
+        if (!parsed) return null;
+
+        const hours = parsed.hours;
+        const minutes = parsed.minutes;
         const dateInfo = getSelectedDate();
 
         const result = {
