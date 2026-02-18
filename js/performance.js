@@ -73,7 +73,6 @@ function interpolateFuelFlow(endpoints, altitude) {
     return endpoints.low.gph + (endpoints.high.gph - endpoints.low.gph) * frac;
 }
 
-// Climb: uses climb fuel flow interpolated by altitude, with CLIMB_FACTOR
 function calculateClimb(departureElevFt, cruiseAltFt) {
     if (cruiseAltFt <= departureElevFt) return { timeMin: 0, fuelGal: 0, distanceNM: 0 };
 
@@ -103,7 +102,6 @@ function calculateClimb(departureElevFt, cruiseAltFt) {
     };
 }
 
-// Descent: uses descent fuel flow interpolated by altitude, with DESCENT_FACTOR
 function calculateDescent(cruiseAltFt, destElevFt) {
     if (cruiseAltFt <= destElevFt) return { timeMin: 0, fuelGal: 0, distanceNM: 0 };
 
@@ -134,7 +132,7 @@ function calculateDescent(cruiseAltFt, destElevFt) {
     };
 }
 
-// Cruise: uses altitude-specific GPH from performance table
+// Cruise fuel uses per-altitude GPH from fltplan.com performance table
 function calculateCruise(cruiseDistNM, altitude, groundSpeed) {
     if (cruiseDistNM <= 0) return { timeMin: 0, fuelGal: 0, tas: 0 };
     var perf = getPerformanceAtAltitude(altitude);
@@ -152,7 +150,7 @@ function calculateCruise(cruiseDistNM, altitude, groundSpeed) {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         PERFORMANCE_TABLE, CLIMB_FACTOR, DESCENT_FACTOR,
-        TAXI_FUEL, getPerformanceAtAltitude,
-        calculateClimb, calculateDescent, calculateCruise
+        TAXI_FUEL, CLIMB_FUEL_FLOW, DESCENT_FUEL_FLOW,
+        getPerformanceAtAltitude, calculateClimb, calculateDescent, calculateCruise
     };
 }
