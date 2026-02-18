@@ -1,7 +1,7 @@
 // ============================================================
 // FLIGHT CALC MODULE — Complete Flight Planning
 // TBM850 Apple Flight Planner
-// Requires: performance.js, route.js, winds.js loaded first
+// Requires: performance.js, route.js, gfs-winds.js loaded first
 // ============================================================
 
 // Calculate a complete flight from departure to destination
@@ -9,19 +9,51 @@
 // dest: { ident, lat, lon, elevation }
 // cruiseAlt: altitude in feet MSL
 // groundSpeed: optional wind-corrected GS (null = use TAS)
-function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
+// gfsData: optional GFS wind data object for climb/descent corrections
+// Returns full flight plan with all phases
+function calculateFlight(dep, dest, cruiseAlt, groundSpeed, gfsData) {
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
 
-    // Phase 1: Climb
+    // Phase 1: Climb (POH/fltplan still-air values)
     var climb = calculateClimb(dep.elevation, cruiseAlt);
 
-    // Phase 2: Descent
+    // Phase 2: Descent (POH/fltplan still-air values)
     var descent = calculateDescent(cruiseAlt, dest.elevation);
 
-    // Phase 3: Cruise (remaining distance)
-    var cruiseDist = totalDist - climb.distanceNM - descent.distanceNM;
-    if (cruiseDist < 0) cruiseDist = 0;
+    // Apply wind corrections to climb/descent DISTANCE only
+    // Time and fuel are unchanged — wind only affects ground covered
+    var climbDist = climb.distanceNM;
+    var descentDist = descent.distanceNM;
+    var climbWindCorr = 0;
+    var descentWindCorr = 0;
+
+    if (gfsData && gfsData.waypoints && gfsData.waypoints.length >= 2) {
+        // Wind-corrected climb distance
+        var climbResult = calcWindCorrectedClimbDist(
+            climb.distanceNM, dep.elevation, cruiseAlt, trueCourse, gfsData
+        );
+        climbDist = climbResult.distNm;
+        climbWindCorr = climbResult.correction;
+
+        // Wind-corrected descent distance
+        var descentResult = calcWindCorrectedDescentDist(
+            descent.distanceNM, dest.elevation, cruiseAlt, trueCourse, gfsData
+        );
+        descentDist = descentResult.distNm;
+        descentWindCorr = descentResult.correction;
+    }
+
+    // Phase 3: Cruise (remaining distance after wind-corrected climb/descent)
+    var cruiseDist = totalDist - climbDist - descentDist;
+
+    // Safety: cruise distance must be positive
+    if (cruiseDist < 0) {
+        // Route too short for full climb + descent at this altitude
+        console.warn('[CALC] Cruise distance negative (' + Math.round(cruiseDist) +
+            'nm) — altitude may be too high for this ' + Math.round(totalDist) + 'nm route');
+        cruiseDist = 0;
+    }
 
     var cruise = calculateCruise(cruiseDist, cruiseAlt, groundSpeed);
 
@@ -35,7 +67,13 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
         distance:    Math.round(totalDist * 10) / 10,
         trueCourse:  Math.round(trueCourse),
         cruiseAlt:   cruiseAlt,
-        climb:       climb,
+        climb: {
+            distanceNM: Math.round(climbDist * 10) / 10,
+            timeMin:    climb.timeMin,
+            fuelGal:    climb.fuelGal,
+            windCorrection: climbWindCorr,
+            pohDistNM:  climb.distanceNM  // original still-air distance for reference
+        },
         cruise: {
             distanceNM: Math.round(cruiseDist * 10) / 10,
             timeMin:    cruise.timeMin,
@@ -43,7 +81,13 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
             tas:        cruise.tas,
             groundSpeed: groundSpeed || cruise.tas
         },
-        descent:     descent,
+        descent: {
+            distanceNM: Math.round(descentDist * 10) / 10,
+            timeMin:    descent.timeMin,
+            fuelGal:    descent.fuelGal,
+            windCorrection: descentWindCorr,
+            pohDistNM:  descent.distanceNM  // original still-air distance for reference
+        },
         totals: {
             timeMin:  Math.round(totalTimeMin * 10) / 10,
             timeHrs:  formatTime(totalTimeMin),
@@ -53,123 +97,22 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
     };
 }
 
-// ============================================================
-// ASYNC ALTITUDE OPTIONS — Wind-aware, best 3 by time
-// ============================================================
-// Calculates all 4 valid altitudes for the course direction,
-// fetches winds aloft, applies GS correction, returns best 3.
-// forecastHr: '06', '12', or '24' — NOAA forecast period
-// departureTimeZ: Date object or ISO string in UTC for GFS forecast hour
-// ============================================================
-async function calculateAltitudeOptions(dep, dest, forecastHr, departureTimeZ) {
+// Calculate flights at multiple altitudes for comparison
+// gfsData: optional GFS wind data for climb/descent corrections
+function calculateAltitudeOptions(dep, dest, gfsData) {
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
-    var magCourse = trueCourse; // Will be corrected if getMagneticVariation exists
-    if (typeof getMagneticVariation === 'function') {
-        var midLat = (dep.lat + dest.lat) / 2;
-        var midLon = (dep.lon + dest.lon) / 2;
-        var magVar = getMagneticVariation(midLat, midLon);
-        magCourse = (trueCourse - magVar + 360) % 360;
+    var altitudes = getTop3Altitudes(trueCourse);
+    var results = [];
+
+    for (var i = 0; i < altitudes.length; i++) {
+        var plan = calculateFlight(dep, dest, altitudes[i], null, gfsData);
+        results.push(plan);
     }
-
-    // Get all valid altitudes (4 for the direction), not just top 3
-    var allAltitudes = getValidAltitudes(trueCourse, 24000, 31000);
-
-    // ── WIND DATA FETCH ──────────────────────────────────
-    // Try GFS gridded data first (more accurate), fall back to
-    // NOAA station-based winds if GFS fails.
-    var windData = null;
-    var gfsData = null;
-    var windSource = 'none';
-    var windStatus = 'none';
-    var windPointCount = 0;
-
-    // Attempt 1: GFS gridded winds
-    if (typeof fetchGFSWinds === 'function') {
-        try {
-            console.log('[CALC] Attempting GFS gridded wind fetch...');
-            gfsData = await fetchGFSWinds(dep, dest, departureTimeZ);
-            if (gfsData && gfsData.waypoints && gfsData.waypoints.length >= 3) {
-                windSource = 'GFS';
-                windStatus = 'ok';
-                windPointCount = gfsData.pointCount;
-                console.log('[CALC] GFS wind data available — ' + gfsData.pointCount + ' grid points');
-            } else {
-                console.warn('[CALC] GFS returned insufficient data, falling back to station winds');
-                gfsData = null;
-            }
-        } catch (err) {
-            console.warn('[CALC] GFS fetch failed: ' + err.message + ' — falling back to station winds');
-            gfsData = null;
-        }
-    }
-
-    // Attempt 2: NOAA station-based winds (fallback)
-    if (!gfsData && forecastHr && typeof fetchRouteWinds === 'function') {
-        try {
-            console.log('[CALC] Falling back to station-based wind fetch...');
-            windData = await fetchRouteWinds(dep, dest, forecastHr);
-            if (windData) {
-                windSource = 'NOAA';
-                windStatus = 'ok';
-                windPointCount = windData.stationList ? windData.stationList.length : 0;
-                console.log('[CALC] Station wind data available — ' + windPointCount + ' stations');
-            } else {
-                windStatus = 'failed';
-            }
-        } catch (err) {
-            console.error('[CALC] Station wind fetch error:', err);
-            windStatus = 'failed';
-        }
-    }
-
-    if (!gfsData && !windData) {
-        console.log('[CALC] No wind data — using TAS for ground speed');
-    }
-
-    // ── CALCULATE FLIGHT PLANS ───────────────────────────
-    var options = [];
-    for (var i = 0; i < allAltitudes.length; i++) {
-        var alt = allAltitudes[i];
-
-        // Get TAS at this altitude from performance table
-        var perf = getPerformanceAtAltitude(alt);
-        var tas = perf.cruiseTAS;
-
-        // Calculate wind-corrected ground speed
-        var gs = null;
-        var windSummary = null;
-
-        if (gfsData) {
-            // GFS gridded winds
-            gs = calculateGFSGroundSpeed(gfsData, alt, trueCourse, tas);
-            windSummary = getGFSWindSummary(gfsData, alt, trueCourse, tas);
-        } else if (windData) {
-            // Station-based winds (fallback)
-            gs = calculateGroundSpeed(windData, alt, trueCourse, tas);
-            windSummary = getWindSummary(windData, alt, trueCourse, tas);
-        }
-
-        var plan = calculateFlight(dep, dest, alt, gs);
-        plan.windSummary = windSummary;
-        options.push(plan);
-    }
-
-    // Sort by total time (shortest first)
-    options.sort(function(a, b) {
-        return a.totals.timeMin - b.totals.timeMin;
-    });
-
-    // Return best 3
-    var best3 = options.slice(0, 3);
 
     return {
         trueCourse: Math.round(trueCourse),
-        magCourse: Math.round(magCourse),
         direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
-        windStatus: windStatus,
-        windSource: windSource,
-        windStationCount: windPointCount,
-        options: best3
+        options: results
     };
 }
 

@@ -34,24 +34,32 @@ var GFS_PRODUCTION_LAG_HR = 5;
 // Index: 20   21   22   23   24   25
 //   mb:  100   70   50   30   20   10
 //
-// Flight level to pressure level mapping:
-//   FL240 ≈ 400mb (index 14)
-//   FL250 ≈ 375mb (interpolate 14-15)
-//   FL260 ≈ 350mb (index 15)
-//   FL270 ≈ 325mb (interpolate 15-16)
-//   FL280 ≈ 300mb (index 16)
-//   FL290 ≈ 275mb (interpolate 16-17)
-//   FL300 ≈ 250mb (index 17)
-//   FL310 ≈ 250mb (index 17)
-//   FL340 ≈ 200mb (index 18)
+// We now fetch indices 8-18 (700mb through 200mb) to cover:
+//   FL100 ≈ 700mb (index 8)   — needed for climb/descent winds
+//   FL118 ≈ 650mb (index 9)
+//   FL138 ≈ 600mb (index 10)
+//   FL160 ≈ 550mb (index 11)
+//   FL183 ≈ 500mb (index 12)
+//   FL208 ≈ 450mb (index 13)
+//   FL236 ≈ 400mb (index 14)  — cruise range starts here
+//   FL266 ≈ 350mb (index 15)
+//   FL301 ≈ 300mb (index 16)
+//   FL340 ≈ 250mb (index 17)
+//   FL387 ≈ 200mb (index 18)
 // ============================================================
 
 // Map flight level (feet) to GFS pressure level index
-// We fetch indices 14-18 (400mb through 200mb) and interpolate
-var GFS_LEVEL_RANGE = { start: 14, end: 18 };
+// We fetch indices 8-18 (700mb through 200mb) and interpolate
+var GFS_LEVEL_RANGE = { start: 8, end: 18 };
 
-// Actual pressure values at each index (mb)
+// Actual pressure values at each NOMADS index (mb)
 var GFS_LEVEL_PRESSURES = {
+    8:  700,
+    9:  650,
+    10: 600,
+    11: 550,
+    12: 500,
+    13: 450,
     14: 400,
     15: 350,
     16: 300,
@@ -59,13 +67,35 @@ var GFS_LEVEL_PRESSURES = {
     18: 200
 };
 
+// Standard atmosphere: pressure (mb) to altitude (feet)
+// Used for climb/descent wind corrections
+var GFS_LEVEL_ALTITUDES = {
+    700:  9882,
+    650: 11780,
+    600: 13801,
+    550: 15962,
+    500: 18289,
+    450: 20812,
+    400: 23574,
+    350: 26631,
+    300: 30065,
+    250: 33999,
+    200: 38662
+};
+
 // Flight level to approximate pressure (mb) using standard atmosphere
 function flToPressure(flFeet) {
-    // Standard atmosphere approximation for FL240-FL340 range
-    // More accurate than a simple linear fit
+    // Standard atmosphere approximation
     var altFt = flFeet;
     if (altFt < 100) altFt = altFt * 100; // handle FL240 vs 24000
     var pressures = {
+        10000: 697,
+        12000: 647,
+        14000: 595,
+        16000: 547,
+        18000: 500,
+        20000: 466,
+        22000: 428,
         24000: 400,
         25000: 376,
         26000: 350,
@@ -86,6 +116,7 @@ function flToPressure(flFeet) {
             return pressures[keys[i]] + frac * (pressures[keys[i+1]] - pressures[keys[i]]);
         }
     }
+    if (altFt < keys[0]) return 700;
     return 300; // default to FL280-ish
 }
 
@@ -260,7 +291,7 @@ function generateRouteWaypoints(depLat, depLon, destLat, destLon, numPoints) {
 // ============================================================
 
 function buildGFSPointURL(dateStr, cycleStr, timeIdx, latIdx, lonIdx) {
-    // Query levels 14-18 (400mb through 200mb) in one request
+    // Query levels 8-18 (700mb through 200mb) in one request
     var levRange = GFS_LEVEL_RANGE.start + ':' + GFS_LEVEL_RANGE.end;
     var base = GFS_BASE + '/gfs' + dateStr + '/gfs_0p25_' + cycleStr + '.ascii';
 
@@ -277,14 +308,12 @@ function buildGFSPointURL(dateStr, cycleStr, timeIdx, latIdx, lonIdx) {
 // ============================================================
 // NOMADS OPeNDAP ASCII format returns data like:
 //
-// ugrdprs, [1][5][1][1]
+// ugrdprs, [1][11][1][1]
 // [0][0][0][0], -12.34
 // [0][1][0][0], -14.56
-// [0][2][0][0], -15.78
-// [0][3][0][0], -16.90
-// [0][4][0][0], -18.12
+// ... (11 levels now instead of 5)
 //
-// vgrdprs, [1][5][1][1]
+// vgrdprs, [1][11][1][1]
 // [0][0][0][0], 5.67
 // [0][1][0][0], 6.78
 // ...
@@ -303,7 +332,7 @@ function parseGFSPointResponse(text) {
             var line = lines[i].trim();
             if (!line) continue;
 
-            // Detect variable header: "ugrdprs, [1][5][1][1]" or "ugrdprs.ugrdprs, ..."
+            // Detect variable header: "ugrdprs, [1][11][1][1]" or "ugrdprs.ugrdprs, ..."
             if (line.indexOf('ugrdprs') !== -1 && line.indexOf('[') !== -1 && line.indexOf('],') === -1) {
                 currentVar = 'u';
                 continue;
@@ -542,6 +571,11 @@ async function fetchGFSWinds(dep, dest, departureTimeZ) {
         console.log('[GFS] Sample winds at start (300mb): ' +
             sample.direction + '° @ ' + sample.speed + 'kt');
     }
+    if (validPoints.length > 0 && validPoints[0].winds[700]) {
+        var sampleLow = validPoints[0].winds[700];
+        console.log('[GFS] Sample winds at start (700mb/~FL100): ' +
+            sampleLow.direction + '° @ ' + sampleLow.speed + 'kt');
+    }
     if (validPoints.length > 10 && validPoints[Math.floor(validPoints.length/2)].winds[300]) {
         var mid = validPoints[Math.floor(validPoints.length/2)].winds[300];
         console.log('[GFS] Sample winds at midpoint (300mb): ' +
@@ -741,5 +775,367 @@ function getGFSWindSummary(gfsData, cruiseAltFt, trueCourse, tas) {
         stationCount: count,
         description: desc,
         source: 'GFS ' + gfsData.cycle
+    };
+}
+
+
+// ============================================================
+// CLIMB/DESCENT WIND CORRECTIONS
+// ============================================================
+// Wind doesn't change climb/descent TIME or FUEL — it changes
+// GROUND DISTANCE. A headwind during climb = less ground
+// covered = more cruise distance. Tailwind = opposite.
+//
+// We break the phase into 2000ft altitude bands, get wind at
+// each band from GFS data, compute GS vs TAS ratio, and apply
+// that ratio to the POH still-air distance.
+//
+// Requires: windTriangleGS() from winds.js
+// ============================================================
+
+// Climb TAS at each altitude — derived from fltplan IAS with
+// standard atmosphere density correction
+var CLIMB_TAS_BY_ALT = [
+    { alt:  2000, tas: 153 },
+    { alt:  4000, tas: 168 },
+    { alt:  6000, tas: 173 },
+    { alt:  8000, tas: 179 },
+    { alt: 10000, tas: 183 },
+    { alt: 12000, tas: 190 },
+    { alt: 14000, tas: 196 },
+    { alt: 16000, tas: 203 },
+    { alt: 18000, tas: 210 },
+    { alt: 20000, tas: 216 },
+    { alt: 22000, tas: 218 },
+    { alt: 24000, tas: 221 },
+    { alt: 26000, tas: 225 },
+    { alt: 28000, tas: 229 },
+    { alt: 30000, tas: 230 },
+    { alt: 31000, tas: 226 }
+];
+
+// Descent TAS at each altitude — from fltplan descent IAS
+var DESCENT_TAS_BY_ALT = [
+    { alt:  2000, tas: 132 },
+    { alt:  4000, tas: 168 },
+    { alt:  6000, tas: 249 },
+    { alt:  8000, tas: 257 },
+    { alt: 10000, tas: 263 },
+    { alt: 12000, tas: 272 },
+    { alt: 14000, tas: 281 },
+    { alt: 16000, tas: 290 },
+    { alt: 18000, tas: 302 },
+    { alt: 20000, tas: 310 },
+    { alt: 22000, tas: 322 },
+    { alt: 24000, tas: 320 },
+    { alt: 26000, tas: 318 },
+    { alt: 28000, tas: 315 },
+    { alt: 30000, tas: 307 },
+    { alt: 31000, tas: 297 }
+];
+
+// Rate of climb (fpm) from fltplan.com data
+var CLIMB_ROC_BY_ALT = [
+    { alt:     0, roc: 1000 }, { alt:  1000, roc: 1500 },
+    { alt:  2000, roc: 1500 }, { alt:  3000, roc: 2000 },
+    { alt:  4000, roc: 1980 }, { alt:  5000, roc: 1960 },
+    { alt:  6000, roc: 1940 }, { alt:  7000, roc: 1920 },
+    { alt:  8000, roc: 1900 }, { alt:  9000, roc: 1785 },
+    { alt: 10000, roc: 1670 }, { alt: 11000, roc: 1630 },
+    { alt: 12000, roc: 1590 }, { alt: 13000, roc: 1550 },
+    { alt: 14000, roc: 1510 }, { alt: 15000, roc: 1470 },
+    { alt: 16000, roc: 1425 }, { alt: 17000, roc: 1385 },
+    { alt: 18000, roc: 1345 }, { alt: 19000, roc: 1305 },
+    { alt: 20000, roc: 1265 }, { alt: 21000, roc: 1225 },
+    { alt: 22000, roc: 1185 }, { alt: 23000, roc: 1145 },
+    { alt: 24000, roc: 1105 }, { alt: 25000, roc: 1065 },
+    { alt: 26000, roc: 1020 }, { alt: 27000, roc:  980 },
+    { alt: 28000, roc:  940 }, { alt: 29000, roc:  900 },
+    { alt: 30000, roc:  860 }, { alt: 31000, roc:  800 }
+];
+
+// Interpolate a value from a table by altitude
+function interpTableByAlt(table, altFt, field) {
+    if (altFt <= table[0].alt) return table[0][field];
+    if (altFt >= table[table.length - 1].alt) return table[table.length - 1][field];
+    for (var i = 0; i < table.length - 1; i++) {
+        if (altFt >= table[i].alt && altFt <= table[i + 1].alt) {
+            var frac = (altFt - table[i].alt) / (table[i + 1].alt - table[i].alt);
+            return table[i][field] + frac * (table[i + 1][field] - table[i][field]);
+        }
+    }
+    return table[table.length - 1][field];
+}
+
+// Get wind at a specific altitude from a GFS waypoint's wind data
+// For altitudes below 700mb (~FL100), scale wind proportionally
+function getWindAtAltFromWaypoint(waypointWinds, altFt) {
+    if (!waypointWinds || Object.keys(waypointWinds).length === 0) {
+        return { direction: 0, speed: 0 };
+    }
+
+    // Convert altitude to pressure, then look up
+    var targetMb = flToPressure(altFt);
+
+    // Get available pressure levels sorted descending (high mb = low alt)
+    var levels = Object.keys(waypointWinds).map(Number).sort(function(a,b){return b-a;});
+
+    var highestMb = levels[0];       // highest pressure = lowest altitude
+    var lowestMb = levels[levels.length - 1]; // lowest pressure = highest altitude
+
+    // Below lowest available altitude — scale down proportionally
+    if (targetMb > highestMb) {
+        var lowestWind = waypointWinds[highestMb];
+        // At surface, assume ~20% of lowest-level wind
+        var lowestAlt = GFS_LEVEL_ALTITUDES[highestMb] || 10000;
+        var scaleFactor = 0.2 + 0.8 * Math.min(1.0, altFt / lowestAlt);
+        return {
+            direction: lowestWind.direction,
+            speed: Math.round(lowestWind.speed * scaleFactor)
+        };
+    }
+
+    // Above highest available level — use highest
+    if (targetMb < lowestMb) {
+        var hw = waypointWinds[lowestMb];
+        return { direction: hw.direction, speed: hw.speed };
+    }
+
+    // Find bracketing levels and interpolate
+    var upper = null; // higher pressure (lower alt)
+    var lower = null; // lower pressure (higher alt)
+    for (var j = 0; j < levels.length; j++) {
+        if (levels[j] >= targetMb) upper = levels[j];
+        if (levels[j] <= targetMb && lower === null) lower = levels[j];
+    }
+
+    if (!upper || !lower || upper === lower) {
+        var best = upper || lower;
+        if (best && waypointWinds[best]) {
+            return { direction: waypointWinds[best].direction, speed: waypointWinds[best].speed };
+        }
+        return { direction: 0, speed: 0 };
+    }
+
+    // Interpolate U/V
+    var wU = waypointWinds[upper];
+    var wL = waypointWinds[lower];
+    var frac = (upper - targetMb) / (upper - lower);
+    var u = wU.u + frac * (wL.u - wU.u);
+    var v = wU.v + frac * (wL.v - wU.v);
+    var result = uvToWind(u, v);
+    return { direction: result.direction, speed: result.speed };
+}
+
+// Average wind profile from multiple GFS waypoints
+// Returns a synthetic "winds" object (keyed by mb) usable by getWindAtAltFromWaypoint
+function averageWindsFromWaypoints(gfsWaypoints, startIdx, count) {
+    if (!gfsWaypoints || gfsWaypoints.length === 0) return null;
+
+    var end = Math.min(startIdx + count, gfsWaypoints.length);
+    var actual = end - startIdx;
+    if (actual <= 0) return null;
+
+    // Collect all pressure levels from all selected waypoints
+    var avgWinds = {};
+    var levCounts = {};
+
+    for (var i = startIdx; i < end; i++) {
+        var wp = gfsWaypoints[i];
+        if (!wp || !wp.winds) continue;
+
+        var levels = Object.keys(wp.winds);
+        for (var j = 0; j < levels.length; j++) {
+            var mb = levels[j];
+            var w = wp.winds[mb];
+            if (!avgWinds[mb]) {
+                avgWinds[mb] = { u: 0, v: 0 };
+                levCounts[mb] = 0;
+            }
+            avgWinds[mb].u += w.u;
+            avgWinds[mb].v += w.v;
+            levCounts[mb]++;
+        }
+    }
+
+    // Compute averages and convert to wind format
+    var result = {};
+    var mbs = Object.keys(avgWinds);
+    for (var k = 0; k < mbs.length; k++) {
+        var mb = mbs[k];
+        var avgU = avgWinds[mb].u / levCounts[mb];
+        var avgV = avgWinds[mb].v / levCounts[mb];
+        var wind = uvToWind(avgU, avgV);
+        result[mb] = {
+            direction: wind.direction,
+            speed: wind.speed,
+            u: avgU,
+            v: avgV
+        };
+    }
+
+    return result;
+}
+
+
+// ============================================================
+// MAIN: Calculate wind-corrected climb distance
+// ============================================================
+// pohClimbDistNm  — still-air climb distance from perf tables
+// depElevFt       — departure airport elevation
+// cruiseAltFt     — target cruise altitude
+// courseTrue      — true course from departure
+// gfsData         — full GFS data object from fetchGFSWinds()
+//
+// Returns: { distNm, avgHeadwind, correction }
+// ============================================================
+
+function calcWindCorrectedClimbDist(pohClimbDistNm, depElevFt, cruiseAltFt, courseTrue, gfsData) {
+    if (!gfsData || !gfsData.waypoints || gfsData.waypoints.length < 2) {
+        return { distNm: pohClimbDistNm, avgHeadwind: 0, correction: 0 };
+    }
+
+    // Average winds from first 3 waypoints (near departure)
+    var depWinds = averageWindsFromWaypoints(gfsData.waypoints, 0, 3);
+    if (!depWinds) {
+        return { distNm: pohClimbDistNm, avgHeadwind: 0, correction: 0 };
+    }
+
+    var BAND_SIZE = 2000;
+    var startAlt = Math.max(depElevFt, 0);
+    var endAlt = cruiseAltFt;
+
+    if (endAlt <= startAlt) {
+        return { distNm: pohClimbDistNm, avgHeadwind: 0, correction: 0 };
+    }
+
+    var totalTimeWeightedGS = 0;
+    var totalTimeWeightedTAS = 0;
+    var totalTime = 0;
+
+    var alt = startAlt;
+    while (alt < endAlt) {
+        var bandTop = Math.min(alt + BAND_SIZE, endAlt);
+        var bandMid = (alt + bandTop) / 2;
+        var bandThickness = bandTop - alt;
+
+        var tas = interpTableByAlt(CLIMB_TAS_BY_ALT, bandMid, 'tas');
+        var roc = interpTableByAlt(CLIMB_ROC_BY_ALT, bandMid, 'roc');
+        var wind = getWindAtAltFromWaypoint(depWinds, bandMid);
+        var gs = windTriangleGS(tas, wind.direction, wind.speed, courseTrue);
+
+        var bandTimeMin = bandThickness / roc; // minutes
+
+        totalTimeWeightedGS += gs * bandTimeMin;
+        totalTimeWeightedTAS += tas * bandTimeMin;
+        totalTime += bandTimeMin;
+
+        alt = bandTop;
+    }
+
+    if (totalTime <= 0) {
+        return { distNm: pohClimbDistNm, avgHeadwind: 0, correction: 0 };
+    }
+
+    var avgGS = totalTimeWeightedGS / totalTime;
+    var avgTAS = totalTimeWeightedTAS / totalTime;
+    var gsRatio = avgGS / avgTAS;
+    var correctedDist = Math.round(pohClimbDistNm * gsRatio * 10) / 10;
+    var avgHeadwind = Math.round(avgTAS - avgGS);
+    var correction = Math.round((correctedDist - pohClimbDistNm) * 10) / 10;
+
+    console.log('[WIND-CLB] Climb ' + Math.round(depElevFt) + 'ft → FL' +
+        Math.round(cruiseAltFt / 100) + ': avgTAS=' + Math.round(avgTAS) +
+        ', avgGS=' + Math.round(avgGS) + ', HW=' + avgHeadwind +
+        'kt, POH dist=' + pohClimbDistNm + 'nm → corrected=' +
+        correctedDist + 'nm (' + (correction >= 0 ? '+' : '') + correction + ')');
+
+    return {
+        distNm: correctedDist,
+        avgHeadwind: avgHeadwind,
+        correction: correction
+    };
+}
+
+
+// ============================================================
+// MAIN: Calculate wind-corrected descent distance
+// ============================================================
+
+function calcWindCorrectedDescentDist(pohDescentDistNm, destElevFt, cruiseAltFt, courseTrue, gfsData) {
+    if (!gfsData || !gfsData.waypoints || gfsData.waypoints.length < 2) {
+        return { distNm: pohDescentDistNm, avgHeadwind: 0, correction: 0 };
+    }
+
+    // Average winds from last 3 waypoints (near destination)
+    var arrWinds = averageWindsFromWaypoints(
+        gfsData.waypoints,
+        Math.max(0, gfsData.waypoints.length - 3),
+        3
+    );
+    if (!arrWinds) {
+        return { distNm: pohDescentDistNm, avgHeadwind: 0, correction: 0 };
+    }
+
+    var BAND_SIZE = 2000;
+    var startAlt = cruiseAltFt;
+    var endAlt = Math.max(destElevFt, 0);
+
+    if (startAlt <= endAlt) {
+        return { distNm: pohDescentDistNm, avgHeadwind: 0, correction: 0 };
+    }
+
+    var totalTimeWeightedGS = 0;
+    var totalTimeWeightedTAS = 0;
+    var totalTime = 0;
+
+    // Descent rate: 2000 fpm standard, slightly slower above FL240 and below 6000ft
+    function descentRate(altFt) {
+        if (altFt > 24000) return 1800;
+        if (altFt < 6000) return 1500;
+        return 2000;
+    }
+
+    var alt = startAlt;
+    while (alt > endAlt) {
+        var bandBottom = Math.max(alt - BAND_SIZE, endAlt);
+        var bandMid = (alt + bandBottom) / 2;
+        var bandThickness = alt - bandBottom;
+
+        var tas = interpTableByAlt(DESCENT_TAS_BY_ALT, bandMid, 'tas');
+        var rod = descentRate(bandMid);
+        var wind = getWindAtAltFromWaypoint(arrWinds, bandMid);
+        var gs = windTriangleGS(tas, wind.direction, wind.speed, courseTrue);
+
+        var bandTimeMin = bandThickness / rod;
+
+        totalTimeWeightedGS += gs * bandTimeMin;
+        totalTimeWeightedTAS += tas * bandTimeMin;
+        totalTime += bandTimeMin;
+
+        alt = bandBottom;
+    }
+
+    if (totalTime <= 0) {
+        return { distNm: pohDescentDistNm, avgHeadwind: 0, correction: 0 };
+    }
+
+    var avgGS = totalTimeWeightedGS / totalTime;
+    var avgTAS = totalTimeWeightedTAS / totalTime;
+    var gsRatio = avgGS / avgTAS;
+    var correctedDist = Math.round(pohDescentDistNm * gsRatio * 10) / 10;
+    var avgHeadwind = Math.round(avgTAS - avgGS);
+    var correction = Math.round((correctedDist - pohDescentDistNm) * 10) / 10;
+
+    console.log('[WIND-DES] Descent FL' + Math.round(cruiseAltFt / 100) +
+        ' → ' + Math.round(destElevFt) + 'ft: avgTAS=' + Math.round(avgTAS) +
+        ', avgGS=' + Math.round(avgGS) + ', HW=' + avgHeadwind +
+        'kt, POH dist=' + pohDescentDistNm + 'nm → corrected=' +
+        correctedDist + 'nm (' + (correction >= 0 ? '+' : '') + correction + ')');
+
+    return {
+        distNm: correctedDist,
+        avgHeadwind: avgHeadwind,
+        correction: correction
     };
 }
