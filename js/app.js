@@ -19,8 +19,8 @@ function initApp() {
 
     // Try loading CSV from relative path first, then GitHub raw
     var csvUrls = [
-        'data/us-airports.csv',
-        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/main/us-airports.csv'
+        'us-airports.csv',
+        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv'
     ];
 
     tryLoadAirports(csvUrls, 0, function(err) {
