@@ -623,7 +623,7 @@ const FuelStops = (() => {
       <div style="font-weight:700;font-size:16px;margin-bottom:4px;color:#1e3a5f;">
         ⛽ RANKED FUEL STOP OPTIONS
       </div>
-      <div style="font-size:12px;color:#374151;margin-bottom:10px;">
+      <div style="font-size:12px;color:#1f2937;margin-bottom:10px;">
         Sorted by total trip cost · Departure fuel @ $${depPrice.toFixed(2)}/gal
       </div>
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -669,19 +669,19 @@ const FuelStops = (() => {
 
       html += `<tr style="background:${bg};border-bottom:1px solid #e2e8f0;">
         <td style="padding:6px 4px;text-align:center;font-size:16px;">${rankIcon}</td>
-        <td style="padding:6px 5px;white-space:nowrap;">
-          <strong style="font-size:14px;">${opt.icao}</strong><br>
-          <span style="font-size:11px;color:#374151;">${opt.stop.airport.name}</span><br>
-          <span style="font-size:11px;color:#4b5563;">${cityRegion}</span>
+        <td style="padding:6px 5px;white-space:nowrap;color:#1f2937;">
+          <strong style="font-size:14px;color:#111827;">${opt.icao}</strong><br>
+          <span style="font-size:11px;color:#1f2937;">${opt.stop.airport.name}</span><br>
+          <span style="font-size:11px;color:#1f2937;">${cityRegion}</span>
         </td>
         <td style="padding:6px 5px;text-align:center;">${caaBadge}</td>
         <td style="padding:6px 5px;font-size:12px;color:#1f2937;max-width:130px;overflow:hidden;text-overflow:ellipsis;">${opt.fbo || '—'}</td>
-        <td style="padding:6px 5px;text-align:right;white-space:nowrap;">${priceHtml}</td>
-        <td style="padding:6px 5px;text-align:right;color:#374151;white-space:nowrap;">${opt.stop.distFromDep}nm</td>
+        <td style="padding:6px 5px;text-align:right;white-space:nowrap;color:#1f2937;">${priceHtml}</td>
+        <td style="padding:6px 5px;text-align:right;color:#1f2937;white-space:nowrap;">${opt.stop.distFromDep}nm</td>
         <td style="padding:6px 5px;text-align:center;color:#1f2937;">${opt.altitude}</td>
         <td style="padding:6px 5px;text-align:right;color:#1f2937;">${formatTime(opt.totalTime)}</td>
-        <td style="padding:6px 5px;text-align:right;"><strong>$${opt.totalCost.toFixed(0)}</strong></td>
-        <td style="padding:6px 5px;font-size:12px;white-space:nowrap;">${tags.join(' ')}</td>
+        <td style="padding:6px 5px;text-align:right;color:#1f2937;"><strong>$${opt.totalCost.toFixed(0)}</strong></td>
+        <td style="padding:6px 5px;font-size:12px;white-space:nowrap;color:#1f2937;">${tags.join(' ')}</td>
       </tr>`;
 
       // Alternate altitudes for same airport
@@ -696,7 +696,7 @@ const FuelStops = (() => {
 
         html += `<tr style="background:${bg};border-bottom:1px solid #f1f5f9;">
           <td style="padding:2px 4px;"></td>
-          <td style="padding:2px 5px;color:#4b5563;font-size:11px;">↳ alt option</td>
+          <td style="padding:2px 5px;color:#1f2937;font-size:11px;">↳ alt option</td>
           <td style="padding:2px 5px;"></td>
           <td style="padding:2px 5px;"></td>
           <td style="padding:2px 5px;"></td>
@@ -704,7 +704,7 @@ const FuelStops = (() => {
           <td style="padding:2px 5px;text-align:center;font-size:13px;color:#1f2937;">${altOpt.altitude}</td>
           <td style="padding:2px 5px;text-align:right;font-size:13px;color:#1f2937;">${formatTime(altOpt.totalTime)}</td>
           <td style="padding:2px 5px;text-align:right;font-size:13px;color:#1f2937;">$${altOpt.totalCost.toFixed(0)}</td>
-          <td style="padding:2px 5px;font-size:11px;">${altTags.join(' ')}</td>
+          <td style="padding:2px 5px;font-size:11px;color:#1f2937;">${altTags.join(' ')}</td>
         </tr>`;
       }
     });
@@ -794,7 +794,7 @@ const FuelStops = (() => {
       <div style="font-size:14px;color:#1f2937;">
         ${opt.altitude} · ${formatTime(opt.totalTime)} · ${opt.totalFuel} gal · <strong>$${opt.totalCost.toFixed(0)}</strong>
       </div>
-      <div style="font-size:12px;color:#4b5563;margin-top:4px;">
+      <div style="font-size:12px;color:#1f2937;margin-top:4px;">
         Leg 1: ${opt.leg1Dist}nm (${formatTime(opt.leg1Time)}, ${opt.leg1Fuel}g)
         → Leg 2: ${opt.leg2Dist}nm (${formatTime(opt.leg2Time)}, ${opt.leg2Fuel}g)
         → Leg 3: ${opt.leg3Dist}nm (${formatTime(opt.leg3Time)}, ${opt.leg3Fuel}g)
@@ -856,7 +856,7 @@ const FuelStops = (() => {
       } else {
         tdPrice.textContent = 'loading…';
         fetchAirNavFuel(icao).then(fuel => {
-          tdPrice.innerHTML = fuel ? `<strong>$${fuel.retailPrice.toFixed(2)}</strong>` : '—';
+          tdPrice.innerHTML = fuel ? `<strong style="color:#1f2937;">$${fuel.retailPrice.toFixed(2)}</strong>` : '—';
           tdFBO.textContent = fuel ? fuel.fbo : '—';
         });
       }
@@ -878,7 +878,7 @@ const FuelStops = (() => {
   function formatPriceCell(icao, fuelData) {
     if (fuelData && fuelData.caaPrice) {
       return `<strong style="color:#16a34a;">$${fuelData.caaPrice.toFixed(2)}</strong> ` +
-        `<span style="text-decoration:line-through;color:#374151;font-size:11px;">$${fuelData.retailPrice.toFixed(2)}</span>`;
+        `<span style="text-decoration:line-through;color:#1f2937;font-size:11px;">$${fuelData.retailPrice.toFixed(2)}</span>`;
     }
     if (fuelData && fuelData.retailPrice) {
       return `<strong style="color:#1f2937;">$${fuelData.retailPrice.toFixed(2)}</strong>`;
