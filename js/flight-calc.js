@@ -2,78 +2,34 @@
 // FLIGHT CALC MODULE — Complete Flight Planning
 // TBM850 Apple Flight Planner
 // Requires: performance.js, route.js loaded first
-// Optional: gfs-winds.js for wind-corrected climb/descent
+// Optional: winds-aloft.js for wind correction
 // ============================================================
-
-// Minimum usable cruise segment (nm). If cruise distance after
-// subtracting climb+descent is below this, the altitude is
-// flagged as not viable for this route length.
-var MIN_CRUISE_DIST_NM = 10;
 
 // Calculate a complete flight from departure to destination
 // dep: { ident, lat, lon, elevation }
 // dest: { ident, lat, lon, elevation }
 // cruiseAlt: altitude in feet MSL
-// groundSpeed: optional wind-corrected cruise GS (null = use TAS)
-// gfsData: optional GFS wind data for climb/descent corrections
-// Returns full flight plan with all phases
-function calculateFlight(dep, dest, cruiseAlt, groundSpeed, gfsData) {
+// groundSpeed: optional wind-corrected GS (null = use TAS)
+// windInfo: optional { dir, spd, headTail, crosswind }
+function calculateFlight(dep, dest, cruiseAlt, groundSpeed, windInfo) {
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
 
-    // Auto-detect GFS wind cache if not passed directly
-    if (!gfsData && typeof _gfsWindCache !== 'undefined' && _gfsWindCache) {
-        gfsData = _gfsWindCache;
-    }
-
-    // Phase 1: Climb (still-air POH values with correction factor)
+    // Phase 1: Climb
     var climb = calculateClimb(dep.elevation, cruiseAlt);
-    var climbDistRaw = climb.distanceNM;  // before wind correction
 
-    // Phase 2: Descent (still-air POH values with correction factor)
+    // Phase 2: Descent
     var descent = calculateDescent(cruiseAlt, dest.elevation);
-    var descentDistRaw = descent.distanceNM;  // before wind correction
 
-    // Apply wind corrections to climb/descent DISTANCE if GFS data available
-    // Wind affects ground distance covered, NOT time or fuel
-    var climbDistWind = climbDistRaw;
-    var descentDistWind = descentDistRaw;
+    // Phase 3: Cruise (remaining distance)
+    var cruiseDist = totalDist - climb.distanceNM - descent.distanceNM;
+    if (cruiseDist < 0) cruiseDist = 0;
 
-    if (gfsData) {
-        if (typeof calcWindCorrectedClimbDist === 'function') {
-            climbDistWind = calcWindCorrectedClimbDist(
-                climbDistRaw, dep.elevation, cruiseAlt, trueCourse, gfsData
-            );
-            console.log('[WIND-CLB] POH: ' + climbDistRaw.toFixed(1) +
-                'nm → Wind-corrected: ' + climbDistWind.toFixed(1) + 'nm' +
-                ' (delta: ' + (climbDistWind - climbDistRaw).toFixed(1) + 'nm)');
-        }
-        if (typeof calcWindCorrectedDescentDist === 'function') {
-            descentDistWind = calcWindCorrectedDescentDist(
-                descentDistRaw, dest.elevation, cruiseAlt, trueCourse, gfsData
-            );
-            console.log('[WIND-DES] POH: ' + descentDistRaw.toFixed(1) +
-                'nm → Wind-corrected: ' + descentDistWind.toFixed(1) + 'nm' +
-                ' (delta: ' + (descentDistWind - descentDistRaw).toFixed(1) + 'nm)');
-        }
-    }
+    var perf = getPerformanceAtAltitude(cruiseAlt);
+    var tas = perf.cruiseTAS;
+    var gs = groundSpeed || tas;
 
-    // Phase 3: Cruise (remaining distance after wind-corrected climb+descent)
-    var cruiseDist = totalDist - climbDistWind - descentDistWind;
-
-    // Short-route safeguard: flag altitude as not viable if cruise too short
-    var viable = true;
-    if (cruiseDist < MIN_CRUISE_DIST_NM) {
-        console.log('[SHORT-RTE] FL' + (cruiseAlt / 100) +
-            ': climb(' + climbDistWind.toFixed(1) + ') + descent(' +
-            descentDistWind.toFixed(1) + ') = ' +
-            (climbDistWind + descentDistWind).toFixed(1) +
-            'nm vs route ' + totalDist.toFixed(1) + 'nm — NOT VIABLE');
-        cruiseDist = 0;
-        viable = false;
-    }
-
-    var cruise = calculateCruise(cruiseDist, cruiseAlt, groundSpeed);
+    var cruise = calculateCruise(cruiseDist, cruiseAlt, gs);
 
     // Totals
     var totalTimeMin = climb.timeMin + cruise.timeMin + descent.timeMin;
@@ -85,76 +41,74 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed, gfsData) {
         distance:    Math.round(totalDist * 10) / 10,
         trueCourse:  Math.round(trueCourse),
         cruiseAlt:   cruiseAlt,
-        viable:      viable,
-        climb: {
-            distanceNM: Math.round(climbDistWind * 10) / 10,
-            distanceNM_nowind: Math.round(climbDistRaw * 10) / 10,
-            timeMin:    climb.timeMin,
-            fuelGal:    climb.fuelGal
-        },
+        climb:       climb,
         cruise: {
             distanceNM: Math.round(cruiseDist * 10) / 10,
             timeMin:    cruise.timeMin,
             fuelGal:    cruise.fuelGal,
-            tas:        cruise.tas,
-            groundSpeed: groundSpeed || cruise.tas
+            tas:        tas,
+            groundSpeed: Math.round(gs)
         },
-        descent: {
-            distanceNM: Math.round(descentDistWind * 10) / 10,
-            distanceNM_nowind: Math.round(descentDistRaw * 10) / 10,
-            timeMin:    descent.timeMin,
-            fuelGal:    descent.fuelGal
-        },
+        descent:     descent,
         totals: {
             timeMin:  Math.round(totalTimeMin * 10) / 10,
             timeHrs:  formatTime(totalTimeMin),
             fuelGal:  Math.round(totalFuelGal * 10) / 10,
             taxiFuel: TAXI_FUEL
-        }
+        },
+        wind: windInfo || null
     };
 }
 
 // Calculate flights at multiple altitudes for comparison
-// Filters out non-viable altitudes (climb+descent exceeds route)
-function calculateAltitudeOptions(dep, dest) {
+// Now with optional wind data for ground speed correction
+// windData: parsed winds aloft data from WindsAloft.fetchAllWinds()
+function calculateAltitudeOptions(dep, dest, windData) {
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
-    var altitudes = getTop3Altitudes(trueCourse);
+    var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
+
+    // Get ALL valid altitudes for this direction
+    var allAlts = getValidAltitudes(trueCourse, 18000, 31000);
+
+    // Calculate midpoint of route for wind interpolation
+    var mid = intermediatePoint(dep.lat, dep.lon, dest.lat, dest.lon, 0.5);
+
     var results = [];
 
-    for (var i = 0; i < altitudes.length; i++) {
-        var plan = calculateFlight(dep, dest, altitudes[i], null, null);
-        if (plan.viable) {
-            results.push(plan);
+    for (var i = 0; i < allAlts.length; i++) {
+        var alt = allAlts[i];
+        var perf = getPerformanceAtAltitude(alt);
+        var gs = perf.cruiseTAS;
+        var windInfo = null;
+
+        // Apply wind correction if we have wind data
+        if (windData && typeof WindsAloft !== 'undefined') {
+            var windResult = WindsAloft.getGroundSpeed(
+                windData, mid.lat, mid.lon, alt, trueCourse, perf.cruiseTAS
+            );
+            gs = windResult.groundSpeed;
+            windInfo = {
+                dir: windResult.wind ? windResult.wind.dir : 0,
+                spd: windResult.wind ? windResult.wind.spd : 0,
+                headTail: windResult.headTail,
+                crosswind: windResult.crosswind
+            };
         }
+
+        var plan = calculateFlight(dep, dest, alt, gs, windInfo);
+        results.push(plan);
     }
 
-    // If ALL altitudes were filtered out (extremely short route),
-    // try lower altitudes down to FL180
-    if (results.length === 0) {
-        console.log('[SHORT-RTE] All standard altitudes non-viable, trying lower FLs');
-        var lowerAlts = [24000, 22000, 20000, 18000];
-        for (var j = 0; j < lowerAlts.length; j++) {
-            var lowPlan = calculateFlight(dep, dest, lowerAlts[j], null, null);
-            if (lowPlan.viable) {
-                results.push(lowPlan);
-                if (results.length >= 3) break;
-            }
-        }
-    }
-
-    // Last resort: if still nothing viable, include lowest with warning
-    if (results.length === 0) {
-        console.log('[SHORT-RTE] No altitude viable — route may be too short for TBM850 optimization');
-        var minPlan = calculateFlight(dep, dest, 18000, null, null);
-        minPlan.viable = true;  // force it in so user sees something
-        minPlan.warning = 'Route very short — climb/descent dominate';
-        results.push(minPlan);
-    }
+    // Sort by total time (shortest first) and take best 3
+    results.sort(function (a, b) { return a.totals.timeMin - b.totals.timeMin; });
+    var best3 = results.slice(0, 3);
 
     return {
         trueCourse: Math.round(trueCourse),
         direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
-        options: results
+        options: best3,
+        hasWindData: !!windData,
+        allOptions: results  // Keep all for reference
     };
 }
 
@@ -168,7 +122,7 @@ function formatTime(totalMinutes) {
 
 // Check if any altitude option triggers fuel stop search (>= 3:30)
 function needsFuelStop(altitudeOptions) {
-    var threshold = 3.5 * 60; // 3 hours 30 minutes
+    var threshold = 3.5 * 60; // 3 hours 30 minutes = 210 minutes
     for (var i = 0; i < altitudeOptions.options.length; i++) {
         if (altitudeOptions.options[i].totals.timeMin >= threshold) {
             return true;

@@ -2,14 +2,16 @@
 // APP MODULE — TBM850 Apple Flight Planner
 // UI wiring, state management, event handlers
 // Requires: airports.js, performance.js, route.js, flight-calc.js,
-//           timezone.js, departure-time.js
+//           timezone.js, departure-time.js, winds-aloft.js, fuel-stops.js
 // ============================================================
 
 var appState = {
     departure: null,
     destination: null,
     lastResults: null,
-    departureInfo: null   // Departure time/date/Zulu from DepartureTime module
+    departureInfo: null,
+    windData: null,
+    fuelStopCandidates: null
 };
 
 // ============================================================
@@ -18,7 +20,7 @@ var appState = {
 function initApp() {
     updateStatus('loading', 'Loading airports...');
 
-    // CSV is in REPO ROOT (not data/ subfolder). Fallback uses apple branch.
+    // CSV is in REPO ROOT. Fallback uses apple branch.
     var csvUrls = [
         'us-airports.csv',
         'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv'
@@ -32,7 +34,6 @@ function initApp() {
         updateStatus('ok', airportDB.length + ' airports loaded');
         setupAutocomplete('dep-input', 'dep-dropdown', 'dep-info', function(apt) {
             appState.departure = apt;
-            // Update timezone + Zulu conversion when departure airport changes
             if (apt && typeof DepartureTime !== 'undefined') {
                 DepartureTime.setAirport({
                     icao: apt.ident,
@@ -49,7 +50,7 @@ function initApp() {
         });
         document.getElementById('btn-calc').addEventListener('click', runCalculation);
 
-        // Initialize departure time module (day pills, time input, Zulu line)
+        // Initialize departure time module
         if (typeof DepartureTime !== 'undefined') {
             DepartureTime.init();
         }
@@ -57,10 +58,8 @@ function initApp() {
         // Listen for departure time/day changes
         document.addEventListener('departureTimeChanged', function(e) {
             appState.departureInfo = e.detail;
-            // Future: trigger winds aloft refresh when Zulu time changes
         });
 
-        // Focus departure field
         document.getElementById('dep-input').focus();
     });
 }
@@ -117,7 +116,6 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         dropdown.classList.add('active');
     });
 
-    // Keyboard navigation
     input.addEventListener('keydown', function(e) {
         if (!dropdown.classList.contains('active')) return;
         var items = dropdown.querySelectorAll('.autocomplete-item');
@@ -141,14 +139,12 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         }
     });
 
-    // Close on outside tap
     document.addEventListener('click', function(e) {
         if (!input.contains(e.target) && !dropdown.contains(e.target)) {
             dropdown.classList.remove('active');
         }
     });
 
-    // Also try exact match on blur (user typed full code and tabbed away)
     input.addEventListener('blur', function() {
         setTimeout(function() {
             if (appState.departure && inputId === 'dep-input') return;
@@ -199,7 +195,7 @@ function escHTML(s) {
 }
 
 // ============================================================
-// CALCULATION
+// CALCULATION — with winds aloft
 // ============================================================
 function checkReady() {
     var btn = document.getElementById('btn-calc');
@@ -211,10 +207,57 @@ function runCalculation() {
 
     var dep = appState.departure;
     var dest = appState.destination;
-    var results = calculateAltitudeOptions(dep, dest);
-    appState.lastResults = results;
+    var btn = document.getElementById('btn-calc');
+    btn.disabled = true;
+    btn.textContent = 'Fetching winds...';
+    updateStatus('loading', 'Fetching winds aloft...');
 
-    displayResults(results, dep, dest);
+    fetchWindsForRoute(function(windData) {
+        appState.windData = windData;
+
+        var results = calculateAltitudeOptions(dep, dest, windData);
+        appState.lastResults = results;
+
+        // Find fuel stop candidates if needed
+        appState.fuelStopCandidates = null;
+        if (needsFuelStop(results) && typeof FuelStops !== 'undefined') {
+            var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
+            appState.fuelStopCandidates = FuelStops.findCandidates(dep, dest, totalDist);
+        }
+
+        displayResults(results, dep, dest);
+
+        btn.disabled = false;
+        btn.textContent = 'Calculate Flight Plan';
+        updateStatus('ok', airportDB.length + ' airports loaded');
+        updateWindStatus(!!windData);
+    });
+}
+
+function fetchWindsForRoute(callback) {
+    if (typeof WindsAloft === 'undefined') {
+        callback(null);
+        return;
+    }
+
+    var fcstHours = 6;
+
+    WindsAloft.fetchAllWinds(fcstHours)
+        .then(function(data) {
+            var stationCount = 0;
+            for (var s in data) stationCount++;
+            if (stationCount < 5) {
+                console.warn('Wind data too sparse: ' + stationCount + ' stations');
+                callback(null);
+                return;
+            }
+            console.log('Winds loaded: ' + stationCount + ' stations');
+            callback(data);
+        })
+        .catch(function(err) {
+            console.warn('Wind fetch failed:', err);
+            callback(null);
+        });
 }
 
 // ============================================================
@@ -226,13 +269,11 @@ function displayResults(results, dep, dest) {
 
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
 
-    // Route summary
     document.getElementById('sum-route').textContent = dep.ident + ' \u2192 ' + dest.ident;
     document.getElementById('sum-dist').textContent = Math.round(totalDist);
     document.getElementById('sum-course').textContent = results.trueCourse + '\u00B0';
     document.getElementById('sum-dir').textContent = results.direction;
 
-    // Fuel stop check
     var fuelStopEl = document.getElementById('fuel-stop-indicator');
     if (needsFuelStop(results)) {
         fuelStopEl.innerHTML = '<span class="fuel-stop-badge">Fuel Stop Required</span>';
@@ -244,7 +285,6 @@ function displayResults(results, dep, dest) {
     var tbody = document.getElementById('alt-table-body');
     tbody.innerHTML = '';
 
-    // Find best (shortest time) option
     var bestIdx = 0;
     for (var i = 1; i < results.options.length; i++) {
         if (results.options[i].totals.timeMin < results.options[bestIdx].totals.timeMin) {
@@ -256,39 +296,51 @@ function displayResults(results, dep, dest) {
         var plan = results.options[i];
         var tr = document.createElement('tr');
         if (i === bestIdx) tr.className = 'best';
+
+        var windCol = '';
+        if (plan.wind) {
+            var ht = plan.wind.headTail;
+            if (ht > 0) {
+                windCol = '<span style="color:#4caf50;">+' + ht + '</span>';
+            } else if (ht < 0) {
+                windCol = '<span style="color:#f44336;">' + ht + '</span>';
+            } else {
+                windCol = '0';
+            }
+        } else {
+            windCol = '\u2014';
+        }
+
         tr.innerHTML =
             '<td>FL' + (plan.cruiseAlt / 100) + '</td>' +
             '<td>' + plan.totals.timeHrs + '</td>' +
             '<td>' + plan.totals.fuelGal + '</td>' +
             '<td>' + plan.cruise.tas + '</td>' +
-            '<td>' + Math.round(plan.cruise.groundSpeed) + '</td>';
+            '<td>' + plan.cruise.groundSpeed + '</td>' +
+            '<td>' + windCol + '</td>';
+
         tr.addEventListener('click', (function(p) {
             return function() { displayPhaseDetail(p); };
         })(plan));
         tbody.appendChild(tr);
     }
 
-    // Auto-show phase detail for best option
     displayPhaseDetail(results.options[bestIdx]);
-
-    // Scroll to results
+    displayFuelStops();
     section.scrollIntoView({ behavior: 'smooth' });
 }
 
 function displayPhaseDetail(plan) {
     var el = document.getElementById('phase-detail');
 
-    // Build departure/arrival time display if we have departure info
     var timeDisplay = '';
     if (appState.departureInfo && appState.departureInfo.zuluDate && appState.destination) {
         var depInfo = appState.departureInfo;
         var depLocal = depInfo.localMilitary;
 
-        // Calculate arrival Zulu time (departure Zulu + total flight time in minutes)
         var flightTimeMs = plan.totals.timeMin * 60 * 1000;
         var arrivalZulu = new Date(depInfo.zuluDate.getTime() + flightTimeMs);
 
-        // Convert arrival to destination local time
         var arrLocal = null;
         if (typeof DepartureTime !== 'undefined') {
             arrLocal = DepartureTime.getArrivalLocal(arrivalZulu, {
@@ -303,13 +355,27 @@ function displayPhaseDetail(plan) {
                 '<div class="phase-name" style="font-weight:600;">Depart</div>' +
                 '<div class="phase-value">' + depLocal + '</div>' +
                 '<div class="phase-name" style="font-weight:600;">Arrive</div>' +
-                '<div class="phase-value">' + (arrLocal ? arrLocal.localMilitary : '—') + '</div>' +
+                '<div class="phase-value">' + (arrLocal ? arrLocal.localMilitary : '\u2014') + '</div>' +
+            '</div>';
+    }
+
+    var windLine = '';
+    if (plan.wind && plan.wind.spd > 0) {
+        var htLabel = plan.wind.headTail >= 0 ? 'Tailwind' : 'Headwind';
+        var htValue = Math.abs(plan.wind.headTail);
+        windLine =
+            '<div class="phase-row" style="border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:8px;color:#4da6ff;">' +
+                '<div class="phase-name">Wind</div>' +
+                '<div class="phase-value">' + plan.wind.dir + '\u00B0/' + plan.wind.spd + 'kt</div>' +
+                '<div class="phase-name">' + htLabel + '</div>' +
+                '<div class="phase-value">' + htValue + 'kt</div>' +
             '</div>';
     }
 
     el.innerHTML =
         '<div class="card-title">FL' + (plan.cruiseAlt / 100) + ' Phase Breakdown</div>' +
         timeDisplay +
+        windLine +
         '<div class="phase-row header">' +
             '<div>Phase</div><div class="phase-value">Time</div>' +
             '<div class="phase-value">Fuel</div><div class="phase-value">Dist</div>' +
@@ -336,6 +402,47 @@ function phaseRow(name, time, fuel, dist) {
 }
 
 // ============================================================
+// FUEL STOP DISPLAY
+// ============================================================
+function displayFuelStops() {
+    var container = document.getElementById('fuel-stops-section');
+    if (!container) return;
+
+    if (!appState.fuelStopCandidates || appState.fuelStopCandidates.length === 0) {
+        container.innerHTML = '';
+        container.classList.remove('visible');
+        return;
+    }
+
+    var html = '<div class="card"><div class="card-title">Fuel Stop Options</div>';
+    html += '<table class="alt-table"><thead><tr>' +
+        '<th>Airport</th><th>From Dep</th><th>To Dest</th><th>Off Route</th>' +
+        '</tr></thead><tbody>';
+
+    for (var i = 0; i < appState.fuelStopCandidates.length; i++) {
+        var fs = appState.fuelStopCandidates[i];
+        var apt = fs.airport;
+        var rowClass = i === 0 ? ' class="best"' : '';
+
+        html += '<tr' + rowClass + '>' +
+            '<td><strong>' + escHTML(apt.ident) + '</strong><br>' +
+            '<span style="font-size:0.75rem;color:var(--text-label);">' + escHTML(apt.name) + '</span><br>' +
+            '<span style="font-size:0.7rem;color:var(--text-label);">' +
+                escHTML(apt.municipality || '') +
+                (apt.region ? ', ' + escHTML(apt.region.replace('US-', '')) : '') +
+            '</span></td>' +
+            '<td>' + fs.distFromDep + 'nm</td>' +
+            '<td>' + fs.distFromDest + 'nm</td>' +
+            '<td>' + fs.distOffRoute + 'nm</td>' +
+            '</tr>';
+    }
+
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+    container.classList.add('visible');
+}
+
+// ============================================================
 // STATUS BAR
 // ============================================================
 function updateStatus(state, msg) {
@@ -343,6 +450,14 @@ function updateStatus(state, msg) {
     var text = document.getElementById('status-text');
     dot.className = 'status-dot ' + state;
     text.textContent = msg;
+}
+
+function updateWindStatus(hasWind) {
+    var windStatus = document.getElementById('wind-status');
+    if (windStatus) {
+        windStatus.textContent = hasWind ? 'Winds applied' : 'No wind correction';
+        windStatus.style.color = hasWind ? '#4caf50' : '';
+    }
 }
 
 // ============================================================
