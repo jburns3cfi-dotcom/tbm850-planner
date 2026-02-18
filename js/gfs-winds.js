@@ -11,6 +11,10 @@
 // Requires Cloudflare Worker proxy for CORS.
 // ============================================================
 
+// Global cache — flight-calc.js reads this directly for climb/descent corrections
+// Eliminates need for app.js to pass gfsData through function calls
+var _gfsWindCache = null;
+
 // Proxy URL — same worker as NOAA winds aloft
 var GFS_PROXY_URL = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
 
@@ -582,7 +586,7 @@ async function fetchGFSWinds(dep, dest, departureTimeZ) {
             mid.direction + '° @ ' + mid.speed + 'kt');
     }
 
-    return {
+    var result = {
         waypoints: validPoints,
         totalDist: totalDist,
         source: 'GFS',
@@ -590,6 +594,12 @@ async function fetchGFSWinds(dep, dest, departureTimeZ) {
         forecastHour: timeIdx * 3,
         pointCount: validPoints.length
     };
+
+    // Cache globally so flight-calc.js can access for climb/descent corrections
+    _gfsWindCache = result;
+    console.log('[GFS] Wind data cached for climb/descent corrections');
+
+    return result;
 }
 
 

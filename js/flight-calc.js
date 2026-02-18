@@ -15,6 +15,11 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed, gfsData) {
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
 
+    // Auto-detect GFS data: use passed param, or fall back to global cache
+    if (!gfsData && typeof _gfsWindCache !== 'undefined' && _gfsWindCache) {
+        gfsData = _gfsWindCache;
+    }
+
     // Phase 1: Climb (POH/fltplan still-air values)
     var climb = calculateClimb(dep.elevation, cruiseAlt);
 
@@ -100,6 +105,10 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed, gfsData) {
 // Calculate flights at multiple altitudes for comparison
 // gfsData: optional GFS wind data for climb/descent corrections
 function calculateAltitudeOptions(dep, dest, gfsData) {
+    // Auto-detect GFS data from global cache if not passed
+    if (!gfsData && typeof _gfsWindCache !== 'undefined' && _gfsWindCache) {
+        gfsData = _gfsWindCache;
+    }
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
     var altitudes = getTop3Altitudes(trueCourse);
     var results = [];
