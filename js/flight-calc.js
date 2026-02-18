@@ -98,7 +98,8 @@ async function calculateAltitudeOptions(dep, dest, forecastHr) {
         var alt = allAltitudes[i];
 
         // Get TAS at this altitude from performance table
-        var tas = getCruiseTAS(alt);
+        var perf = getPerformanceAtAltitude(alt);
+        var tas = perf.cruiseTAS;
 
         // Calculate wind-corrected ground speed
         var gs = null;
