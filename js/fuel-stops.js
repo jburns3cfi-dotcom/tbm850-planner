@@ -1,15 +1,15 @@
 // ============================================================
-// fuel-stops.js — TBM850 Fuel Stop Module v8
+// fuel-stops.js — TBM850 Fuel Stop Module v9
 // ============================================================
 // CAA-first fuel pricing with AirNav fallback
 // Ranking: Fastest / Cheapest / Best
 // 2-stop strategy for long routes
-// v8: Tighter spacing, darker text, FROM DEP column, CAA badges in 2-stop
+// v9: METAR line per airport, TAF pill button with popup
 // CAA and AirNav called DIRECTLY — NEVER through proxy
 // ============================================================
 
 const FuelStops = (() => {
-  console.log('[FuelStops] v8 loaded — refined display, darker colors, CAA/FBO/price visible');
+  console.log('[FuelStops] v9 loaded — METAR + TAF per fuel stop airport');
 
   // ---- CONSTANTS ----
   const MAX_FUEL_GAL = 282;
@@ -36,6 +36,133 @@ const FuelStops = (() => {
   let lastDepIdent = '';
   let lastDestIdent = '';
   let lastTotalDist = 0;
+
+  // ---- METAR / TAF CACHES ----
+  const metarCache = {};
+  const tafCache = {};
+
+  // ========================================
+  // TAF POPUP MODAL — inject once into DOM
+  // ========================================
+  function ensureTafModal() {
+    if (document.getElementById('taf-modal-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'taf-modal-overlay';
+    overlay.style.cssText = `
+      display:none;position:fixed;top:0;left:0;width:100%;height:100%;
+      background:rgba(0,0,0,0.5);z-index:9999;justify-content:center;
+      align-items:center;padding:20px;box-sizing:border-box;
+    `;
+    overlay.innerHTML = `
+      <div id="taf-modal-box" style="
+        background:#fff;border-radius:10px;max-width:600px;width:100%;
+        max-height:80vh;overflow-y:auto;padding:20px;position:relative;
+        box-shadow:0 8px 30px rgba(0,0,0,0.25);
+      ">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div id="taf-modal-title" style="font-weight:700;font-size:16px;color:#1e3a5f;">TAF Forecast</div>
+          <button id="taf-modal-close" style="
+            background:#e2e8f0;border:none;border-radius:6px;padding:6px 14px;
+            font-size:14px;color:#1f2937;cursor:pointer;font-weight:600;
+            -webkit-tap-highlight-color:transparent;
+          ">✕ Close</button>
+        </div>
+        <pre id="taf-modal-body" style="
+          font-family:'Courier New',Courier,monospace;font-size:13px;
+          color:#111827;white-space:pre-wrap;word-break:break-word;
+          line-height:1.5;background:#f8fafc;border:1px solid #e2e8f0;
+          border-radius:6px;padding:12px;margin:0;
+        ">Loading TAF...</pre>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    // Close handlers
+    document.getElementById('taf-modal-close').addEventListener('click', closeTafModal);
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeTafModal();
+    });
+  }
+
+  function showTafModal(icao) {
+    ensureTafModal();
+    const overlay = document.getElementById('taf-modal-overlay');
+    const title = document.getElementById('taf-modal-title');
+    const body = document.getElementById('taf-modal-body');
+
+    title.textContent = `TAF Forecast — ${icao}`;
+    body.textContent = 'Loading TAF...';
+    overlay.style.display = 'flex';
+
+    // Check cache first
+    if (tafCache[icao]) {
+      body.textContent = tafCache[icao];
+      return;
+    }
+
+    // Fetch TAF from AirNav worker
+    fetch(`${AIRNAV_URL}/?type=taf&id=${icao}`)
+      .then(resp => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+      })
+      .then(data => {
+        let tafText = '';
+        if (data.taf) {
+          tafText = data.taf;
+        } else if (data.raw) {
+          tafText = data.raw;
+        } else if (typeof data === 'string') {
+          tafText = data;
+        } else {
+          tafText = JSON.stringify(data, null, 2);
+        }
+        tafCache[icao] = tafText || 'No TAF available for this airport.';
+        body.textContent = tafCache[icao];
+      })
+      .catch(err => {
+        console.warn(`[FuelStops] TAF fetch failed for ${icao}:`, err);
+        const msg = `TAF not available for ${icao}.\n\nThis airport may not have a TAF issued.\nCheck nearby airports for the closest forecast.`;
+        tafCache[icao] = msg;
+        body.textContent = msg;
+      });
+  }
+
+  function closeTafModal() {
+    const overlay = document.getElementById('taf-modal-overlay');
+    if (overlay) overlay.style.display = 'none';
+  }
+
+  // Make showTafModal accessible from inline onclick handlers
+  window._fuelStopsTafPopup = showTafModal;
+
+  // ========================================
+  // METAR FETCH
+  // ========================================
+  async function fetchMetar(icao) {
+    if (metarCache[icao]) return metarCache[icao];
+    try {
+      const resp = await fetch(`${AIRNAV_URL}/?type=metar&id=${icao}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      let metarText = '';
+      if (data.metar) {
+        metarText = data.metar;
+      } else if (data.raw) {
+        metarText = data.raw;
+      } else if (typeof data === 'string') {
+        metarText = data;
+      } else {
+        metarText = '';
+      }
+      metarCache[icao] = metarText || '';
+      return metarCache[icao];
+    } catch (err) {
+      console.warn(`[FuelStops] METAR fetch failed for ${icao}:`, err);
+      metarCache[icao] = '';
+      return '';
+    }
+  }
 
   // ========================================
   // AUTO-FETCH CAA on script load
@@ -407,12 +534,24 @@ const FuelStops = (() => {
     const depPrice = depFuel ? (depFuel.caaPrice || depFuel.retailPrice || 6.00) : 6.00;
     const depFBO = depFuel ? depFuel.fbo : '';
 
-    // 3. Fetch fuel prices for all candidates in parallel
+    // 3. Fetch fuel prices AND METARs for all candidates in parallel
     const priceMap = {};
-    await Promise.all(candidates.map(async (c) => {
-      const icao = c.airport.ident;
-      priceMap[icao] = getCAAData(icao) || await fetchAirNavFuel(icao);
-    }));
+    const metarMap = {};
+    const allIcaos = candidates.map(c => c.airport.ident);
+
+    await Promise.all([
+      // Fuel prices
+      ...candidates.map(async (c) => {
+        const icao = c.airport.ident;
+        priceMap[icao] = getCAAData(icao) || await fetchAirNavFuel(icao);
+      }),
+      // METARs
+      ...allIcaos.map(async (icao) => {
+        metarMap[icao] = await fetchMetar(icao);
+      })
+    ]);
+
+    console.log(`[FuelStops] METARs fetched for ${Object.keys(metarMap).length} airports`);
 
     // 4. Score 1-stop options: each candidate × each altitude
     const singleStops = [];
@@ -456,7 +595,7 @@ const FuelStops = (() => {
     const twoStops = await analyze2Stop(candidates, altitudes, depPrice, priceMap);
 
     // 6. Render
-    renderRankedResults(singleStops, twoStops, altitudes, depPrice, depFBO, priceMap);
+    renderRankedResults(singleStops, twoStops, altitudes, depPrice, depFBO, priceMap, metarMap);
   }
 
   // ========================================
@@ -521,9 +660,59 @@ const FuelStops = (() => {
   }
 
   // ========================================
+  // METAR + TAF HTML HELPERS
+  // ========================================
+  function buildMetarLine(icao, metarMap) {
+    const metar = metarMap[icao] || '';
+    if (!metar) {
+      return `<div style="margin-top:3px;">
+        <span style="font-family:'Courier New',Courier,monospace;font-size:11px;color:#1f2937;">METAR unavailable</span>
+        <button onclick="window._fuelStopsTafPopup('${icao}')" style="
+          display:inline-block;margin-left:6px;background:#3b82f6;color:#fff;
+          border:none;border-radius:4px;padding:2px 8px;font-size:10px;
+          font-weight:700;cursor:pointer;vertical-align:middle;
+          -webkit-tap-highlight-color:transparent;
+        ">TAF</button>
+      </div>`;
+    }
+    // Trim METAR to keep it compact — show the raw METAR string
+    const trimmed = metar.length > 120 ? metar.substring(0, 117) + '...' : metar;
+    return `<div style="margin-top:3px;">
+      <span style="font-family:'Courier New',Courier,monospace;font-size:11px;color:#111827;line-height:1.3;">${escapeHtml(trimmed)}</span>
+      <button onclick="window._fuelStopsTafPopup('${icao}')" style="
+        display:inline-block;margin-left:6px;background:#3b82f6;color:#fff;
+        border:none;border-radius:4px;padding:2px 8px;font-size:10px;
+        font-weight:700;cursor:pointer;vertical-align:middle;
+        -webkit-tap-highlight-color:transparent;
+      ">TAF</button>
+    </div>`;
+  }
+
+  function buildMetarLineCompact(icao, metarMap) {
+    // Shorter version for 2-stop cards
+    const metar = metarMap[icao] || '';
+    const display = metar
+      ? (metar.length > 90 ? metar.substring(0, 87) + '...' : metar)
+      : 'METAR unavailable';
+    return `<div style="margin-top:2px;">
+      <span style="font-family:'Courier New',Courier,monospace;font-size:10px;color:#111827;">${escapeHtml(display)}</span>
+      <button onclick="window._fuelStopsTafPopup('${icao}')" style="
+        display:inline-block;margin-left:4px;background:#3b82f6;color:#fff;
+        border:none;border-radius:3px;padding:1px 6px;font-size:9px;
+        font-weight:700;cursor:pointer;vertical-align:middle;
+        -webkit-tap-highlight-color:transparent;
+      ">TAF</button>
+    </div>`;
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ========================================
   // RENDER RANKED RESULTS
   // ========================================
-  function renderRankedResults(singleStops, twoStops, altitudes, depPrice, depFBO, priceMap) {
+  function renderRankedResults(singleStops, twoStops, altitudes, depPrice, depFBO, priceMap, metarMap) {
     console.log('[FuelStops] Rendering ranked results');
 
     // Find existing fuel stops area
@@ -591,12 +780,12 @@ const FuelStops = (() => {
 
     // 1-STOP RANKED TABLE
     if (singleStops.length > 0) {
-      html += build1StopTable(rankedAirports, singleStops, fastest1, cheapest1, depPrice, priceMap);
+      html += build1StopTable(rankedAirports, singleStops, fastest1, cheapest1, depPrice, priceMap, metarMap);
     }
 
     // 2-STOP SECTION
     if (twoStops.length > 0) {
-      html += build2StopSection(twoStops, cheapest2, fastest2, cheapest1, needs2Stops);
+      html += build2StopSection(twoStops, cheapest2, fastest2, cheapest1, needs2Stops, metarMap);
     }
 
     // Inject
@@ -618,7 +807,7 @@ const FuelStops = (() => {
   }
 
   // ---- 1-STOP TABLE BUILDER ----
-  function build1StopTable(rankedAirports, allOptions, fastest1, cheapest1, depPrice, priceMap) {
+  function build1StopTable(rankedAirports, allOptions, fastest1, cheapest1, depPrice, priceMap, metarMap) {
     let html = `<div style="margin-bottom:20px;">
       <div style="font-weight:700;font-size:16px;margin-bottom:4px;color:#1e3a5f;">
         ⛽ RANKED FUEL STOP OPTIONS
@@ -667,21 +856,25 @@ const FuelStops = (() => {
         ? opt.stop.airport.municipality + (region ? ', ' + region : '')
         : region;
 
+      // Build the METAR + TAF line for this airport
+      const metarHtml = buildMetarLine(opt.icao, metarMap);
+
       html += `<tr style="background:${bg};border-bottom:1px solid #e2e8f0;">
         <td style="padding:6px 4px;text-align:center;font-size:16px;">${rankIcon}</td>
-        <td style="padding:6px 5px;white-space:nowrap;color:#1f2937;">
+        <td style="padding:6px 5px;color:#1f2937;" colspan="1">
           <strong style="font-size:14px;color:#111827;">${opt.icao}</strong><br>
           <span style="font-size:11px;color:#1f2937;">${opt.stop.airport.name}</span><br>
           <span style="font-size:11px;color:#1f2937;">${cityRegion}</span>
+          ${metarHtml}
         </td>
-        <td style="padding:6px 5px;text-align:center;">${caaBadge}</td>
-        <td style="padding:6px 5px;font-size:12px;color:#1f2937;max-width:130px;overflow:hidden;text-overflow:ellipsis;">${opt.fbo || '—'}</td>
-        <td style="padding:6px 5px;text-align:right;white-space:nowrap;color:#1f2937;">${priceHtml}</td>
-        <td style="padding:6px 5px;text-align:right;color:#1f2937;white-space:nowrap;">${opt.stop.distFromDep}nm</td>
-        <td style="padding:6px 5px;text-align:center;color:#1f2937;">${opt.altitude}</td>
-        <td style="padding:6px 5px;text-align:right;color:#1f2937;">${formatTime(opt.totalTime)}</td>
-        <td style="padding:6px 5px;text-align:right;color:#1f2937;"><strong>$${opt.totalCost.toFixed(0)}</strong></td>
-        <td style="padding:6px 5px;font-size:12px;white-space:nowrap;color:#1f2937;">${tags.join(' ')}</td>
+        <td style="padding:6px 5px;text-align:center;vertical-align:top;">${caaBadge}</td>
+        <td style="padding:6px 5px;font-size:12px;color:#1f2937;max-width:130px;overflow:hidden;text-overflow:ellipsis;vertical-align:top;">${opt.fbo || '—'}</td>
+        <td style="padding:6px 5px;text-align:right;white-space:nowrap;color:#1f2937;vertical-align:top;">${priceHtml}</td>
+        <td style="padding:6px 5px;text-align:right;color:#1f2937;white-space:nowrap;vertical-align:top;">${opt.stop.distFromDep}nm</td>
+        <td style="padding:6px 5px;text-align:center;color:#1f2937;vertical-align:top;">${opt.altitude}</td>
+        <td style="padding:6px 5px;text-align:right;color:#1f2937;vertical-align:top;">${formatTime(opt.totalTime)}</td>
+        <td style="padding:6px 5px;text-align:right;color:#1f2937;vertical-align:top;"><strong>$${opt.totalCost.toFixed(0)}</strong></td>
+        <td style="padding:6px 5px;font-size:12px;white-space:nowrap;color:#1f2937;vertical-align:top;">${tags.join(' ')}</td>
       </tr>`;
 
       // Alternate altitudes for same airport
@@ -714,7 +907,7 @@ const FuelStops = (() => {
   }
 
   // ---- 2-STOP SECTION BUILDER ----
-  function build2StopSection(twoStops, cheapest2, fastest2, cheapest1, needs2Stops) {
+  function build2StopSection(twoStops, cheapest2, fastest2, cheapest1, needs2Stops, metarMap) {
     const title = needs2Stops ? '⛽ 2-STOP ROUTE OPTIONS' : '💡 2-STOP STRATEGY RECOMMENDATION';
     const borderColor = needs2Stops ? '#93c5fd' : '#6ee7b7';
     const bgColor = needs2Stops ? '#f0f9ff' : '#ecfdf5';
@@ -724,11 +917,11 @@ const FuelStops = (() => {
       <div style="font-weight:700;font-size:16px;color:${titleColor};margin-bottom:12px;">${title}</div>`;
 
     // Cheapest 2-stop card
-    html += build2StopCard(cheapest2, '💰 CHEAPEST', cheapest1, needs2Stops);
+    html += build2StopCard(cheapest2, '💰 CHEAPEST', cheapest1, needs2Stops, metarMap);
 
     // Fastest 2-stop if different
     if (fastest2 && (fastest2.icao1 !== cheapest2.icao1 || fastest2.icao2 !== cheapest2.icao2 || fastest2.altitude !== cheapest2.altitude)) {
-      html += build2StopCard(fastest2, '⚡ FASTEST', cheapest1, needs2Stops);
+      html += build2StopCard(fastest2, '⚡ FASTEST', cheapest1, needs2Stops, metarMap);
     }
 
     // Compact table of more options
@@ -773,7 +966,7 @@ const FuelStops = (() => {
     return html;
   }
 
-  function build2StopCard(opt, label, cheapest1, needs2Stops) {
+  function build2StopCard(opt, label, cheapest1, needs2Stops, metarMap) {
     const caaTag = (icao) => isCAA(icao)
       ? ' <span style="background:#22c55e;color:#fff;font-size:10px;padding:1px 4px;border-radius:3px;">CAA</span>' : '';
 
@@ -787,6 +980,10 @@ const FuelStops = (() => {
       }
     }
 
+    // METAR lines for both stop airports
+    const metar1Html = buildMetarLineCompact(opt.icao1, metarMap);
+    const metar2Html = buildMetarLineCompact(opt.icao2, metarMap);
+
     return `<div style="background:#fff;border-radius:6px;padding:12px;margin-bottom:10px;border:1px solid #e2e8f0;">
       <div style="font-weight:600;font-size:14px;margin-bottom:6px;color:#1f2937;">
         ${label}: ${lastDepIdent} → ${opt.icao1}${caaTag(opt.icao1)} → ${opt.icao2}${caaTag(opt.icao2)} → ${lastDestIdent}
@@ -798,6 +995,12 @@ const FuelStops = (() => {
         Leg 1: ${opt.leg1Dist}nm (${formatTime(opt.leg1Time)}, ${opt.leg1Fuel}g)
         → Leg 2: ${opt.leg2Dist}nm (${formatTime(opt.leg2Time)}, ${opt.leg2Fuel}g)
         → Leg 3: ${opt.leg3Dist}nm (${formatTime(opt.leg3Time)}, ${opt.leg3Fuel}g)
+      </div>
+      <div style="margin-top:6px;padding-top:6px;border-top:1px solid #e2e8f0;">
+        <div style="font-size:11px;font-weight:600;color:#1e3a5f;">Stop 1: ${opt.icao1}</div>
+        ${metar1Html}
+        <div style="font-size:11px;font-weight:600;color:#1e3a5f;margin-top:4px;">Stop 2: ${opt.icao2}</div>
+        ${metar2Html}
       </div>
       ${savingsNote}
     </div>`;
@@ -897,6 +1100,7 @@ const FuelStops = (() => {
     fuelRemaining,
     maxFlightTime,
     fetchAirNavFuel,
+    fetchMetar,
     MAX_FUEL: MAX_FUEL_GAL,
     MIN_LANDING: MIN_LANDING_GAL,
     TRIGGER_HOURS: FUEL_STOP_TRIGGER_HRS
