@@ -1,668 +1,362 @@
 // ============================================================
-// fuel-stops.js — TBM850 Fuel Stop Module
-// ============================================================
-// CAA-first fuel pricing with AirNav fallback
-// Integrates with main flight planner
+// fuel-stops.js — TBM850 Fuel Stop Candidate Finder + Pricing
+// Must load BEFORE app.js in index.html
 // ============================================================
 
 const FuelStops = (() => {
-  // ---- CONSTANTS ----
-  const MAX_FUEL_GAL = 282;        // Max usable fuel
-  const MIN_LANDING_GAL = 75;      // Never land with less
-  const FUEL_STOP_TRIGGER_HRS = 3.5; // 3:30 flight time trigger
-  const CORRIDOR_WIDTH_NM = 30;    // Search 30nm each side of route
-  const MIN_STOP_SPACING_NM = 200; // Stops must be ≥200nm apart
-  const FUEL_HOUR1 = 75;           // First hour burn (gal) — fltplan.com validated
-  const FUEL_HOURX = 65;           // Subsequent hours burn (gal) — fltplan.com validated
-  const CLIMB_FACTOR = 1.40;       // Real-world climb correction
-  const DESCENT_FACTOR = 1.12;     // Real-world descent correction
+    'use strict';
 
-  // CAA Worker
-  const CAA_URL = 'https://caa-fuel.jburns3cfi.workers.dev';
-  // AirNav Worker
-  const AIRNAV_URL = 'https://airnav-grab.jburns3cfi.workers.dev';
+    // ----- Internal state -----
+    let caaData = null;        // {KXXX: {fbo, city, state, retail, caa_price}}
+    let caaLoaded = false;
+    let lastCandidates = [];   // Store last findCandidates result for enrichment
+    let fuelCache = {};        // Per-airport fuel cache {KXXX: {fbo, price, caaPrice, isCAA}}
 
-  // Descent distances (nm) from POH at 1500 fpm, CAS 230
-  // Multiplied by DESCENT_FACTOR for real-world
-  const DESCENT_DIST_NM = {
-    31000: 101 * DESCENT_FACTOR,  // ~113nm
-    30000: 97 * DESCENT_FACTOR,
-    29000: 93 * DESCENT_FACTOR,
-    28000: 89 * DESCENT_FACTOR,
-    27000: 85 * DESCENT_FACTOR,
-    26000: 81 * DESCENT_FACTOR,
-    25000: 77 * DESCENT_FACTOR,
-    24000: 74 * DESCENT_FACTOR,
-    23000: 70 * DESCENT_FACTOR,
-    22000: 66 * DESCENT_FACTOR,
-    21000: 62 * DESCENT_FACTOR,
-    20000: 59 * DESCENT_FACTOR,
-    19000: 55 * DESCENT_FACTOR,
-    18000: 53 * DESCENT_FACTOR,
-    16000: 46 * DESCENT_FACTOR,
-    14000: 40 * DESCENT_FACTOR,
-    12000: 33 * DESCENT_FACTOR,
-    10000: 27 * DESCENT_FACTOR,
-  };
+    // ----- Constants -----
+    const CAA_URL = 'https://caa-fuel.jburns3cfi.workers.dev';
+    const AIRNAV_URL = 'https://airnav-grab.jburns3cfi.workers.dev';
+    const CORRIDOR_NM = 30;
+    const MIN_FROM_DEP_NM = 200;
+    const DESCENT_BUFFER_NM = 60;   // Exclude airports this close to destination
 
-  // ---- STATE ----
-  let caaAirports = null;   // {ICAO: {fbo, city, state, retail, caa_price}}
-  let caaLoaded = false;
-  let caaLoadPromise = null;
+    // =========================================================
+    // AUTO-FETCH CAA DATA ON SCRIPT LOAD
+    // =========================================================
+    (function autoFetchCAA() {
+        fetch(CAA_URL)
+            .then(r => r.json())
+            .then(data => {
+                if (data.success && data.airports) {
+                    caaData = data.airports;
+                    caaLoaded = true;
+                    // Pre-populate fuelCache with CAA data
+                    for (const ident in caaData) {
+                        const a = caaData[ident];
+                        fuelCache[ident] = {
+                            fbo: a.fbo,
+                            price: a.caa_price,
+                            retailPrice: a.retail,
+                            caaPrice: a.caa_price,
+                            isCAA: true,
+                            source: 'CAA'
+                        };
+                    }
+                    console.log(`[FuelStops] CAA data loaded: ${data.count} airports`);
+                    // If table is already rendered, enhance it now
+                    enhanceFuelTable();
+                }
+            })
+            .catch(err => console.warn('[FuelStops] CAA fetch failed:', err));
+    })();
 
-  // ========================================
-  // INITIALIZATION — Fetch CAA data in bulk
-  // ========================================
-  async function init() {
-    if (caaLoaded) return true;
-    if (caaLoadPromise) return caaLoadPromise;
+    // =========================================================
+    // MATH HELPERS
+    // =========================================================
+    const toRad = d => d * Math.PI / 180;
+    const toDeg = r => r * 180 / Math.PI;
 
-    caaLoadPromise = _fetchCAA();
-    return caaLoadPromise;
-  }
-
-  async function _fetchCAA() {
-    try {
-      console.log('[FuelStops] Fetching CAA fuel data...');
-      const resp = await fetch(CAA_URL);
-      if (!resp.ok) throw new Error(`CAA fetch failed: ${resp.status}`);
-      const data = await resp.json();
-
-      if (data.success && data.airports) {
-        caaAirports = data.airports;
-        caaLoaded = true;
-        console.log(`[FuelStops] CAA loaded: ${data.count} airports`);
-        return true;
-      } else {
-        throw new Error('CAA response missing airports');
-      }
-    } catch (err) {
-      console.error('[FuelStops] CAA load failed:', err);
-      caaAirports = {};
-      caaLoaded = true;
-      return false;
-    }
-  }
-
-  // ========================================
-  // FUEL PRICING LOOKUP
-  // ========================================
-
-  function isCAA(icao) {
-    return caaAirports && caaAirports[icao] ? true : false;
-  }
-
-  function getCAAData(icao) {
-    if (!caaAirports || !caaAirports[icao]) return null;
-    const d = caaAirports[icao];
-    return {
-      fbo: d.fbo,
-      city: d.city,
-      state: d.state,
-      retailPrice: d.retail,
-      caaPrice: d.caa_price,
-      savings: d.retail && d.caa_price ? +(d.retail - d.caa_price).toFixed(2) : 0,
-      source: 'CAA'
-    };
-  }
-
-  async function fetchAirNavFuel(icao) {
-    try {
-      const resp = await fetch(`${AIRNAV_URL}/?id=${icao}`);
-      if (!resp.ok) return null;
-      const data = await resp.json();
-
-      if (data.jetA && data.jetA.price) {
-        return {
-          fbo: data.jetA.fbo || 'Unknown FBO',
-          retailPrice: data.jetA.price,
-          caaPrice: null,
-          savings: 0,
-          source: 'AirNav',
-          allFBOs: data.all || []
-        };
-      }
-      return null;
-    } catch (err) {
-      console.warn(`[FuelStops] AirNav fetch failed for ${icao}:`, err);
-      return null;
-    }
-  }
-
-  async function getAirportFuel(icao) {
-    await init();
-    const caa = getCAAData(icao);
-    if (caa) return caa;
-    return await fetchAirNavFuel(icao);
-  }
-
-  // ========================================
-  // FUEL BURN CALCULATIONS
-  // ========================================
-
-  function calcFuelBurn(hours) {
-    if (hours <= 0) return 0;
-    if (hours <= 1) return FUEL_HOUR1 * hours;
-    return FUEL_HOUR1 + FUEL_HOURX * (hours - 1);
-  }
-
-  function fuelRemaining(startFuel, flightHours) {
-    return startFuel - calcFuelBurn(flightHours);
-  }
-
-  function maxFlightTime(startFuel) {
-    const available = startFuel - MIN_LANDING_GAL;
-    if (available <= 0) return 0;
-    if (available <= FUEL_HOUR1) return available / FUEL_HOUR1;
-    return 1 + (available - FUEL_HOUR1) / FUEL_HOURX;
-  }
-
-  // ========================================
-  // GEOMETRY HELPERS
-  // ========================================
-
-  const DEG2RAD = Math.PI / 180;
-  const RAD2DEG = 180 / Math.PI;
-  const NM_PER_RAD = 3440.065;
-
-  function toRad(d) { return d * DEG2RAD; }
-  function toDeg(r) { return r * RAD2DEG; }
-
-  function gcDist(lat1, lon1, lat2, lon2) {
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a = Math.sin(dLat / 2) ** 2 +
-              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-    return 2 * Math.asin(Math.sqrt(a)) * NM_PER_RAD;
-  }
-
-  function bearing(lat1, lon1, lat2, lon2) {
-    const dLon = toRad(lon2 - lon1);
-    const y = Math.sin(dLon) * Math.cos(toRad(lat2));
-    const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
-              Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
-    return (toDeg(Math.atan2(y, x)) + 360) % 360;
-  }
-
-  function crossTrackDist(pLat, pLon, startLat, startLon, endLat, endLon) {
-    const d13 = gcDist(startLat, startLon, pLat, pLon) / NM_PER_RAD;
-    const brng13 = toRad(bearing(startLat, startLon, pLat, pLon));
-    const brng12 = toRad(bearing(startLat, startLon, endLat, endLon));
-    const xt = Math.asin(Math.sin(d13) * Math.sin(brng13 - brng12));
-    return Math.abs(xt * NM_PER_RAD);
-  }
-
-  function alongTrackDist(pLat, pLon, startLat, startLon, endLat, endLon) {
-    const d13 = gcDist(startLat, startLon, pLat, pLon) / NM_PER_RAD;
-    const brng13 = toRad(bearing(startLat, startLon, pLat, pLon));
-    const brng12 = toRad(bearing(startLat, startLon, endLat, endLon));
-    const xt = Math.asin(Math.sin(d13) * Math.sin(brng13 - brng12));
-    const at = Math.acos(Math.cos(d13) / Math.cos(xt));
-    return at * NM_PER_RAD;
-  }
-
-  // ========================================
-  // DESCENT PROFILE
-  // ========================================
-
-  function getDescentDist(altitudeFt) {
-    const alts = Object.keys(DESCENT_DIST_NM).map(Number).sort((a, b) => b - a);
-    for (const alt of alts) {
-      if (altitudeFt >= alt) return DESCENT_DIST_NM[alt];
-    }
-    return 27 * DESCENT_FACTOR;
-  }
-
-  // ========================================
-  // findCandidates — SYNCHRONOUS
-  // ========================================
-  // Called by app.js: FuelStops.findCandidates(dep, dest, totalDist)
-  //
-  // dep/dest = airport objects from autocomplete
-  //   (.ident, .lat, .lon, .name, .municipality, .region, .elevation)
-  // totalDist = route distance in nm
-  //
-  // Returns array of:
-  //   { airport: {ident, name, municipality, region, ...},
-  //     distFromDep, distFromDest, distOffRoute }
-  //
-  // Uses global airportDB loaded by airports.js
-  // ========================================
-  function findCandidates(dep, dest, totalDist) {
-    if (typeof airportDB === 'undefined' || !airportDB || airportDB.length === 0) {
-      console.warn('[FuelStops] airportDB not available');
-      return [];
+    function haversineNM(lat1, lon1, lat2, lon2) {
+        const R = 3440.065; // Earth radius in nautical miles
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+        const a = Math.sin(dLat / 2) ** 2 +
+                  Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                  Math.sin(dLon / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(a));
     }
 
-    const depLat = parseFloat(dep.lat);
-    const depLon = parseFloat(dep.lon);
-    const destLat = parseFloat(dest.lat);
-    const destLon = parseFloat(dest.lon);
-
-    if (isNaN(depLat) || isNaN(depLon) || isNaN(destLat) || isNaN(destLon)) {
-      console.warn('[FuelStops] Invalid departure or destination coordinates');
-      return [];
+    function crossTrackDistNM(aptLat, aptLon, depLat, depLon, destLat, destLon) {
+        // Cross-track distance from a point to the great circle path dep→dest
+        const R = 3440.065;
+        const d13 = haversineNM(depLat, depLon, aptLat, aptLon) / R; // angular dist dep→apt
+        const brng13 = bearingRad(depLat, depLon, aptLat, aptLon);
+        const brng12 = bearingRad(depLat, depLon, destLat, destLon);
+        const xt = Math.asin(Math.sin(d13) * Math.sin(brng13 - brng12));
+        return Math.abs(xt * R);
     }
 
-    // Conservative descent profile exclusion: FL310 worst case
-    const descentDist = DESCENT_DIST_NM[31000] || (101 * DESCENT_FACTOR);
-    const descentThreshold = totalDist - descentDist;
-
-    // Bounding box for quick filter
-    const minLat = Math.min(depLat, destLat) - 1.5;
-    const maxLat = Math.max(depLat, destLat) + 1.5;
-    const minLon = Math.min(depLon, destLon) - 2.0;
-    const maxLon = Math.max(depLon, destLon) + 2.0;
-
-    const candidates = [];
-
-    for (let i = 0; i < airportDB.length; i++) {
-      const apt = airportDB[i];
-
-      // Only medium and large airports — no grass strips
-      if (apt.type !== 'medium_airport' && apt.type !== 'large_airport') continue;
-
-      // Skip departure and destination
-      if (apt.ident === dep.ident || apt.ident === dest.ident) continue;
-
-      const lat = parseFloat(apt.latitude_deg || apt.lat);
-      const lon = parseFloat(apt.longitude_deg || apt.lon);
-      if (isNaN(lat) || isNaN(lon)) continue;
-
-      // Quick bounding box
-      if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) continue;
-
-      // Cross-track distance (how far off the route centerline)
-      const xtDist = crossTrackDist(lat, lon, depLat, depLon, destLat, destLon);
-      if (xtDist > CORRIDOR_WIDTH_NM) continue;
-
-      // Along-track distance (how far from departure along the route)
-      const atDist = alongTrackDist(lat, lon, depLat, depLon, destLat, destLon);
-
-      // Must be ≥200nm from departure
-      if (atDist < MIN_STOP_SPACING_NM) continue;
-
-      // Must not be behind us or past destination
-      if (atDist < 0 || atDist > totalDist) continue;
-
-      // Skip airports inside descent profile
-      if (atDist > descentThreshold) continue;
-
-      candidates.push({
-        airport: {
-          ident: apt.ident,
-          name: apt.name || '',
-          municipality: apt.municipality || '',
-          region: apt.iso_region || apt.region || '',
-          elevation: apt.elevation_ft || apt.elevation || 0,
-          lat: lat,
-          lon: lon,
-          type: apt.type
-        },
-        distFromDep: Math.round(atDist),
-        distFromDest: Math.round(totalDist - atDist),
-        distOffRoute: Math.round(xtDist * 10) / 10
-      });
+    function bearingRad(lat1, lon1, lat2, lon2) {
+        const dLon = toRad(lon2 - lon1);
+        const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+        const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+                  Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+        return Math.atan2(y, x);
     }
 
-    // Sort: CAA airports first (if loaded), then closest to route centerline
-    candidates.sort((a, b) => {
-      const aCaa = (caaAirports && caaAirports[a.airport.ident]) ? 1 : 0;
-      const bCaa = (caaAirports && caaAirports[b.airport.ident]) ? 1 : 0;
-      if (bCaa !== aCaa) return bCaa - aCaa;
-      return a.distOffRoute - b.distOffRoute;
-    });
-
-    // Return top 8 candidates
-    const result = candidates.slice(0, 8);
-    console.log('[FuelStops] Found ' + result.length + ' fuel stop candidates from ' + candidates.length + ' in corridor');
-    return result;
-  }
-
-  // ========================================
-  // CORRIDOR SEARCH (internal, for advanced functions)
-  // ========================================
-  function findCorridorAirports(allAirports, depLat, depLon, destLat, destLon, routeDist) {
-    const candidates = [];
-
-    const minLat = Math.min(depLat, destLat) - 1.5;
-    const maxLat = Math.max(depLat, destLat) + 1.5;
-    const minLon = Math.min(depLon, destLon) - 2.0;
-    const maxLon = Math.max(depLon, destLon) + 2.0;
-
-    for (const apt of allAirports) {
-      if (apt.type !== 'medium_airport' && apt.type !== 'large_airport') continue;
-
-      const lat = parseFloat(apt.latitude_deg || apt.lat);
-      const lon = parseFloat(apt.longitude_deg || apt.lon);
-      if (isNaN(lat) || isNaN(lon)) continue;
-
-      if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) continue;
-
-      const xtDist = crossTrackDist(lat, lon, depLat, depLon, destLat, destLon);
-      if (xtDist > CORRIDOR_WIDTH_NM) continue;
-
-      const atDist = alongTrackDist(lat, lon, depLat, depLon, destLat, destLon);
-
-      if (atDist < MIN_STOP_SPACING_NM) continue;
-      if (atDist < 0 || atDist > routeDist) continue;
-
-      candidates.push({
-        icao: apt.ident,
-        name: apt.name,
-        lat: lat,
-        lon: lon,
-        elev: parseFloat(apt.elevation_ft) || 0,
-        type: apt.type,
-        municipality: apt.municipality || '',
-        region: apt.iso_region || '',
-        alongTrackNM: Math.round(atDist),
-        crossTrackNM: Math.round(xtDist * 10) / 10,
-        distFromDest: Math.round(routeDist - atDist)
-      });
-    }
-
-    candidates.sort((a, b) => a.alongTrackNM - b.alongTrackNM);
-    return candidates;
-  }
-
-  // ========================================
-  // ADVANCED: findFuelStops (async, full analysis)
-  // ========================================
-  async function findFuelStops(params) {
-    const { departure, destination, routeDistance, topAltitudes, allAirports } = params;
-
-    await init();
-
-    const needsStop = topAltitudes.some(a => a.flightTimeHours >= FUEL_STOP_TRIGGER_HRS);
-
-    const depFuel = await getAirportFuel(departure.icao);
-    const destFuel = await getAirportFuel(destination.icao);
-
-    if (!needsStop) {
-      const altResults = topAltitudes.map(a => {
-        const burn = calcFuelBurn(a.flightTimeHours);
-        const remaining = MAX_FUEL_GAL - burn;
-        return {
-          altitude: a.altitude,
-          flightTime: a.flightTimeHours,
-          fuelBurn: Math.round(burn),
-          fuelRemaining: Math.round(remaining),
-          safeToFly: remaining >= MIN_LANDING_GAL
-        };
-      });
-
-      const anyUnsafe = altResults.some(a => !a.safeToFly);
-
-      if (!anyUnsafe) {
-        return {
-          needed: false,
-          reason: 'All top 3 altitudes under 3:30 with safe fuel reserves',
-          departureFuel: depFuel,
-          destinationFuel: destFuel,
-          altitudeAnalysis: altResults,
-          stops: []
-        };
-      }
-    }
-
-    const corridorAirports = findCorridorAirports(
-      allAirports,
-      departure.lat, departure.lon,
-      destination.lat, destination.lon,
-      routeDistance
-    );
-
-    console.log(`[FuelStops] Found ${corridorAirports.length} corridor candidates`);
-
-    const maxAlt = Math.max(...topAltitudes.map(a => a.altitude));
-    const descentDist = getDescentDist(maxAlt);
-    const descentThreshold = routeDistance - descentDist;
-
-    const worstAlt = topAltitudes.reduce((a, b) =>
-      a.flightTimeHours > b.flightTimeHours ? a : b
-    );
-
-    const maxLegTime = maxFlightTime(MAX_FUEL_GAL);
-    const cruiseTAS = worstAlt.cruiseTAS || 280;
-    const maxLegDist = maxLegTime * cruiseTAS;
-    const numStops = Math.ceil(routeDistance / maxLegDist) - 1;
-
-    const stops = [];
-
-    for (let s = 0; s < numStops; s++) {
-      const idealDist = routeDistance * (s + 1) / (numStops + 1);
-      const minDist = (s === 0) ? MIN_STOP_SPACING_NM : stops[s - 1].alongTrackNM + MIN_STOP_SPACING_NM;
-
-      let viable = corridorAirports.filter(apt => {
-        if (apt.alongTrackNM < minDist) return false;
-
-        if (apt.alongTrackNM > descentThreshold) {
-          const legTimeToHere = apt.alongTrackNM / cruiseTAS;
-          const remainingDist = routeDistance - apt.alongTrackNM;
-          const remainingTime = remainingDist / cruiseTAS;
-          const fuelAtDest = fuelRemaining(MAX_FUEL_GAL, legTimeToHere + remainingTime);
-          if (fuelAtDest >= MIN_LANDING_GAL) return false;
+    // =========================================================
+    // findCandidates — SYNCHRONOUS (app.js calls without await)
+    // =========================================================
+    function findCandidates(dep, dest, totalDist) {
+        if (typeof airportDB === 'undefined' || !airportDB || airportDB.length === 0) {
+            console.warn('[FuelStops] airportDB not loaded');
+            return [];
         }
 
-        if (apt.distFromDest < 50) return false;
+        // Get dep/dest coordinates from airportDB
+        const depApt = airportDB.find(a => a.ident === dep);
+        const destApt = airportDB.find(a => a.ident === dest);
+        if (!depApt || !destApt) {
+            console.warn('[FuelStops] Could not find dep or dest in airportDB');
+            return [];
+        }
 
-        return true;
-      });
+        const depLat = parseFloat(depApt.latitude_deg);
+        const depLon = parseFloat(depApt.longitude_deg);
+        const destLat = parseFloat(destApt.latitude_deg);
+        const destLon = parseFloat(destApt.longitude_deg);
 
-      if (viable.length === 0) continue;
+        // Filter candidates
+        const inCorridor = [];
+        for (const apt of airportDB) {
+            // Skip departure, destination
+            if (apt.ident === dep || apt.ident === dest) continue;
 
-      const scored = await scoreAndRankCandidates(viable, idealDist);
+            // Medium and large airports only
+            const t = (apt.type || '').toLowerCase();
+            if (t.indexOf('medium') === -1 && t.indexOf('large') === -1) continue;
 
-      if (scored.length > 0) {
-        stops.push(scored[0]);
-      }
-    }
+            // Must be in the US (ident starts with K and is 4 chars, or starts with P for Alaska/Hawaii)
+            const id = apt.ident || '';
+            if (id.length !== 4) continue;
+            if (id[0] !== 'K' && id[0] !== 'P') continue;
 
-    const result = await buildFuelPlan(departure, destination, stops, topAltitudes, routeDistance, depFuel, destFuel);
+            const aptLat = parseFloat(apt.latitude_deg);
+            const aptLon = parseFloat(apt.longitude_deg);
+            if (isNaN(aptLat) || isNaN(aptLon)) continue;
 
-    return result;
-  }
+            const distFromDep = haversineNM(depLat, depLon, aptLat, aptLon);
+            const distFromDest = haversineNM(aptLat, aptLon, destLat, destLon);
 
-  // ========================================
-  // SCORING & RANKING
-  // ========================================
-  async function scoreAndRankCandidates(candidates, idealDistNM) {
-    const scored = [];
+            // Must be ≥200nm from departure
+            if (distFromDep < MIN_FROM_DEP_NM) continue;
 
-    for (const apt of candidates) {
-      const caaData = getCAAData(apt.icao);
-      let fuelData = caaData;
-      const isCaa = !!caaData;
+            // Skip if in descent profile (too close to destination)
+            if (distFromDest < DESCENT_BUFFER_NM) continue;
 
-      const placementError = Math.abs(apt.alongTrackNM - idealDistNM);
+            // Cross-track (off-route) distance
+            const offRoute = crossTrackDistNM(aptLat, aptLon, depLat, depLon, destLat, destLon);
 
-      let score = placementError + (apt.crossTrackNM * 10);
-      if (isCaa) score -= 500;
+            // Must be within corridor
+            if (offRoute > CORRIDOR_NM) continue;
 
-      scored.push({
-        ...apt,
-        isCaa: isCaa,
-        fuelData: fuelData,
-        score: score,
-        placementError: Math.round(placementError)
-      });
-    }
+            inCorridor.push({
+                airport: {
+                    ident: apt.ident,
+                    name: apt.name,
+                    municipality: apt.municipality || '',
+                    region: (apt.iso_region || '').replace('US-', '')
+                },
+                distFromDep: Math.round(distFromDep * 10) / 10,
+                distFromDest: Math.round(distFromDest * 10) / 10,
+                distOffRoute: Math.round(offRoute * 10) / 10
+            });
+        }
 
-    scored.sort((a, b) => a.score - b.score);
-
-    let airnavFetches = 0;
-    for (const s of scored) {
-      if (!s.isCaa && airnavFetches < 5) {
-        s.fuelData = await fetchAirNavFuel(s.icao);
-        airnavFetches++;
-      }
-    }
-
-    return scored;
-  }
-
-  // ========================================
-  // BUILD FINAL FUEL PLAN
-  // ========================================
-  async function buildFuelPlan(departure, destination, stops, topAltitudes, routeDistance, depFuel, destFuel) {
-    const altitudeAnalysis = [];
-
-    for (const alt of topAltitudes) {
-      const cruiseTAS = alt.cruiseTAS || 280;
-      const legs = [];
-      let prevPoint = departure;
-      let prevDistAlong = 0;
-
-      for (let i = 0; i < stops.length; i++) {
-        const stop = stops[i];
-        const legDist = stop.alongTrackNM - prevDistAlong;
-        const legTime = legDist / cruiseTAS;
-        const legFuel = calcFuelBurn(legTime);
-
-        legs.push({
-          from: prevPoint.icao,
-          to: stop.icao,
-          distNM: Math.round(legDist),
-          timeHrs: Math.round(legTime * 100) / 100,
-          fuelBurn: Math.round(legFuel),
-          fuelRemaining: Math.round(MAX_FUEL_GAL - legFuel),
-          departFuel: MAX_FUEL_GAL
+        // Sort: CAA airports first (if data loaded), then by off-route distance
+        inCorridor.sort((a, b) => {
+            if (caaLoaded) {
+                const aCAA = caaData[a.airport.ident] ? 1 : 0;
+                const bCAA = caaData[b.airport.ident] ? 1 : 0;
+                if (aCAA !== bCAA) return bCAA - aCAA; // CAA first
+            }
+            return a.distOffRoute - b.distOffRoute;
         });
 
-        prevPoint = stop;
-        prevDistAlong = stop.alongTrackNM;
-      }
+        // Take top 8
+        const results = inCorridor.slice(0, 8);
 
-      const finalDist = routeDistance - prevDistAlong;
-      const finalTime = finalDist / cruiseTAS;
-      const finalFuel = calcFuelBurn(finalTime);
+        console.log(`[FuelStops] Found ${results.length} fuel stop candidates from ${inCorridor.length} in corridor`);
 
-      legs.push({
-        from: prevPoint.icao || departure.icao,
-        to: destination.icao,
-        distNM: Math.round(finalDist),
-        timeHrs: Math.round(finalTime * 100) / 100,
-        fuelBurn: Math.round(finalFuel),
-        fuelRemaining: Math.round(MAX_FUEL_GAL - finalFuel),
-        departFuel: MAX_FUEL_GAL
-      });
+        // Store for enrichment
+        lastCandidates = results;
 
-      altitudeAnalysis.push({
-        altitude: alt.altitude,
-        totalFlightTime: alt.flightTimeHours,
-        legs: legs,
-        fuelAtDestination: legs[legs.length - 1].fuelRemaining,
-        safe: legs.every(l => l.fuelRemaining >= MIN_LANDING_GAL)
-      });
+        // Schedule async fuel enrichment after app.js renders the table
+        setTimeout(() => enhanceFuelTable(), 150);
+
+        return results;
     }
 
-    const stopDetails = [];
-    for (const stop of stops) {
-      let fuelInfo = stop.fuelData;
-      if (!fuelInfo) {
-        fuelInfo = await getAirportFuel(stop.icao);
-      }
-
-      stopDetails.push({
-        icao: stop.icao,
-        name: stop.name,
-        lat: stop.lat,
-        lon: stop.lon,
-        elev: stop.elev,
-        municipality: stop.municipality,
-        region: stop.region,
-        type: stop.type,
-        alongRouteNM: stop.alongTrackNM,
-        offRouteNM: stop.crossTrackNM,
-        distFromDest: stop.distFromDest,
-        isCaa: stop.isCaa,
-        fbo: fuelInfo ? fuelInfo.fbo : 'Unknown',
-        retailPrice: fuelInfo ? fuelInfo.retailPrice : null,
-        caaPrice: fuelInfo ? fuelInfo.caaPrice : null,
-        savings: fuelInfo ? fuelInfo.savings : 0,
-        priceSource: fuelInfo ? fuelInfo.source : 'Unknown'
-      });
+    // =========================================================
+    // FUEL DATA FETCHING
+    // =========================================================
+    async function fetchAirNavFuel(ident) {
+        if (fuelCache[ident]) return fuelCache[ident];
+        try {
+            const resp = await fetch(`${AIRNAV_URL}?id=${ident}`);
+            const data = await resp.json();
+            if (data.jetA && data.jetA.price) {
+                const info = {
+                    fbo: data.jetA.fbo || 'Unknown FBO',
+                    price: data.jetA.price,
+                    retailPrice: data.jetA.price,
+                    caaPrice: null,
+                    isCAA: false,
+                    source: 'AirNav'
+                };
+                fuelCache[ident] = info;
+                return info;
+            }
+        } catch (err) {
+            console.warn(`[FuelStops] AirNav fetch failed for ${ident}:`, err);
+        }
+        return null;
     }
 
+    function getCachedFuel(ident) {
+        return fuelCache[ident] || null;
+    }
+
+    // =========================================================
+    // TABLE ENHANCEMENT — Self-contained, no app.js changes
+    // =========================================================
+    function findFuelStopTable() {
+        // Strategy: find the table inside the fuel stops section
+        // Look for a table that has "FROM DEP" in a header cell
+        const tables = document.querySelectorAll('table');
+        for (const table of tables) {
+            const headerText = (table.querySelector('thead') || table).textContent || '';
+            if (headerText.indexOf('FROM DEP') !== -1 || headerText.indexOf('FUEL') !== -1) {
+                return table;
+            }
+        }
+        // Fallback: look for section/div with "fuel" in id or heading
+        const sections = document.querySelectorAll('[id*="fuel" i], [id*="stop" i]');
+        for (const sec of sections) {
+            const t = sec.querySelector('table');
+            if (t) return t;
+        }
+        return null;
+    }
+
+    function enhanceFuelTable() {
+        if (lastCandidates.length === 0) return;
+
+        const table = findFuelStopTable();
+        if (!table) {
+            // Table not rendered yet, retry
+            setTimeout(() => enhanceFuelTable(), 300);
+            return;
+        }
+
+        // Check if already enhanced
+        if (table.dataset.fuelEnhanced === 'true') {
+            // Already enhanced — just update pricing cells
+            updatePricingCells();
+            return;
+        }
+
+        // Mark as enhanced
+        table.dataset.fuelEnhanced = 'true';
+
+        // Add header columns
+        const thead = table.querySelector('thead');
+        if (thead) {
+            const headerRow = thead.querySelector('tr');
+            if (headerRow) {
+                const thFuel = document.createElement('th');
+                thFuel.textContent = 'JET A';
+                thFuel.style.cssText = 'text-align:right; white-space:nowrap;';
+                headerRow.appendChild(thFuel);
+
+                const thFBO = document.createElement('th');
+                thFBO.textContent = 'FBO';
+                thFBO.style.cssText = 'text-align:left;';
+                headerRow.appendChild(thFBO);
+            }
+        }
+
+        // Add data cells to each row
+        const tbody = table.querySelector('tbody') || table;
+        const rows = tbody.querySelectorAll('tr');
+        let candidateIdx = 0;
+
+        for (const row of rows) {
+            // Skip header rows
+            if (row.querySelector('th')) continue;
+            if (candidateIdx >= lastCandidates.length) break;
+
+            const candidate = lastCandidates[candidateIdx];
+            const ident = candidate.airport.ident;
+
+            // Fuel price cell
+            const tdFuel = document.createElement('td');
+            tdFuel.id = `fuel-price-${ident}`;
+            tdFuel.style.cssText = 'text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums;';
+
+            // FBO cell
+            const tdFBO = document.createElement('td');
+            tdFBO.id = `fuel-fbo-${ident}`;
+            tdFBO.style.cssText = 'text-align:left; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+
+            const cached = getCachedFuel(ident);
+            if (cached) {
+                fillFuelCells(tdFuel, tdFBO, cached);
+            } else {
+                tdFuel.innerHTML = '<span style="color:#888; font-size:0.85em;">loading…</span>';
+                tdFBO.textContent = '';
+                // Fetch from AirNav
+                fetchAirNavFuel(ident).then(info => {
+                    if (info) {
+                        fillFuelCells(tdFuel, tdFBO, info);
+                    } else {
+                        tdFuel.innerHTML = '<span style="color:#999; font-size:0.85em;">—</span>';
+                        tdFBO.textContent = '';
+                    }
+                });
+            }
+
+            row.appendChild(tdFuel);
+            row.appendChild(tdFBO);
+            candidateIdx++;
+        }
+    }
+
+    function fillFuelCells(tdFuel, tdFBO, info) {
+        if (info.isCAA) {
+            // CAA airport — show CAA price with badge, retail crossed out, savings
+            const savings = (info.retailPrice - info.caaPrice).toFixed(2);
+            tdFuel.innerHTML =
+                `<span style="background:#1a7f37; color:#fff; font-size:0.7em; padding:1px 4px; border-radius:3px; vertical-align:middle; margin-right:4px;">CAA</span>` +
+                `<strong style="color:#1a7f37;">$${info.caaPrice.toFixed(2)}</strong>` +
+                `<br><span style="color:#888; font-size:0.8em; text-decoration:line-through;">$${info.retailPrice.toFixed(2)}</span>` +
+                ` <span style="color:#1a7f37; font-size:0.8em;">save $${savings}</span>`;
+        } else {
+            // Non-CAA — show retail price
+            tdFuel.innerHTML = `<strong>$${info.price.toFixed(2)}</strong>`;
+        }
+        tdFBO.textContent = info.fbo || '';
+        tdFBO.title = info.fbo || ''; // Tooltip for truncated names
+    }
+
+    function updatePricingCells() {
+        // Called when CAA data arrives after table was already enhanced
+        for (const candidate of lastCandidates) {
+            const ident = candidate.airport.ident;
+            const tdFuel = document.getElementById(`fuel-price-${ident}`);
+            const tdFBO = document.getElementById(`fuel-fbo-${ident}`);
+            if (!tdFuel || !tdFBO) continue;
+
+            const cached = getCachedFuel(ident);
+            if (cached) {
+                fillFuelCells(tdFuel, tdFBO, cached);
+            }
+        }
+    }
+
+    // =========================================================
+    // PUBLIC API
+    // =========================================================
     return {
-      needed: true,
-      reason: `Flight time ≥${FUEL_STOP_TRIGGER_HRS} hrs — fuel stop required`,
-      departureFuel: depFuel,
-      destinationFuel: destFuel,
-      stops: stopDetails,
-      altitudeAnalysis: altitudeAnalysis,
-      routeDistance: routeDistance,
-      maxFuel: MAX_FUEL_GAL,
-      minLanding: MIN_LANDING_GAL
+        findCandidates,
+        getCachedFuel,
+        fetchAirNavFuel,
+        enhanceFuelTable,
+        init() {
+            // CAA data already auto-fetches on load
+            // This is here for compatibility if app.js calls FuelStops.init()
+            console.log('[FuelStops] init called — CAA auto-fetch already in progress');
+        },
+        get caaLoaded() { return caaLoaded; },
+        get caaAirports() { return caaData; }
     };
-  }
-
-  // ========================================
-  // ALTERNATIVE STOPS
-  // ========================================
-  async function getAlternateStops(params, count = 3) {
-    const { departure, destination, routeDistance, topAltitudes, allAirports } = params;
-    await init();
-
-    const corridorAirports = findCorridorAirports(
-      allAirports,
-      departure.lat, departure.lon,
-      destination.lat, destination.lon,
-      routeDistance
-    );
-
-    const idealDist = routeDistance / 2;
-    const scored = await scoreAndRankCandidates(corridorAirports, idealDist);
-
-    const alternates = [];
-    for (let i = 0; i < Math.min(count + 1, scored.length); i++) {
-      const s = scored[i];
-      let fuelInfo = s.fuelData;
-      if (!fuelInfo) {
-        fuelInfo = await getAirportFuel(s.icao);
-      }
-
-      alternates.push({
-        icao: s.icao,
-        name: s.name,
-        municipality: s.municipality,
-        alongRouteNM: s.alongTrackNM,
-        offRouteNM: s.crossTrackNM,
-        distFromDest: s.distFromDest,
-        isCaa: s.isCaa,
-        fbo: fuelInfo ? fuelInfo.fbo : 'Unknown',
-        retailPrice: fuelInfo ? fuelInfo.retailPrice : null,
-        caaPrice: fuelInfo ? fuelInfo.caaPrice : null,
-        savings: fuelInfo ? fuelInfo.savings : 0,
-        priceSource: fuelInfo ? fuelInfo.source : 'Unknown'
-      });
-    }
-
-    return alternates;
-  }
-
-  // ========================================
-  // PUBLIC API
-  // ========================================
-  return {
-    // Called by app.js — synchronous, returns candidate array
-    findCandidates,
-
-    // Advanced async functions for future use
-    init,
-    findFuelStops,
-    getAlternateStops,
-    getAirportFuel,
-    isCAA,
-    calcFuelBurn,
-    fuelRemaining,
-    maxFlightTime,
-
-    // Constants
-    MAX_FUEL: MAX_FUEL_GAL,
-    MIN_LANDING: MIN_LANDING_GAL,
-    TRIGGER_HOURS: FUEL_STOP_TRIGGER_HRS
-  };
-
 })();
