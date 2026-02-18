@@ -20,8 +20,8 @@ function initApp() {
     updateStatus('loading', 'Loading airports...');
 
     var csvUrls = [
-        'data/us-airports.csv',
-        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/main/us-airports.csv'
+        'us-airports.csv',
+        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv'
     ];
 
     tryLoadAirports(csvUrls, 0, function(err) {
@@ -40,16 +40,17 @@ function initApp() {
         });
         document.getElementById('btn-calc').addEventListener('click', runCalculation);
 
-        initDayPills();
-
-        var depTimeInput = document.getElementById('dep-time');
-        if (depTimeInput) {
-            depTimeInput.addEventListener('input', updateZuluDisplay);
-            updateZuluDisplay();
-        }
-
         document.getElementById('dep-input').focus();
     });
+
+    // Day pills and time input — always init regardless of airport load
+    initDayPills();
+
+    var depTimeInput = document.getElementById('dep-time');
+    if (depTimeInput) {
+        depTimeInput.addEventListener('input', updateZuluDisplay);
+        updateZuluDisplay();
+    }
 }
 
 function tryLoadAirports(urls, idx, callback) {
