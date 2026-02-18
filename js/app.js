@@ -1,18 +1,16 @@
 // ============================================================
 // APP MODULE — TBM850 Apple Flight Planner
 // UI wiring, state management, event handlers
-// Requires: airports.js, performance.js, route.js, winds.js,
-//           flight-calc.js, timezone.js
+// Requires: airports.js, performance.js, route.js, winds.js, flight-calc.js
 // ============================================================
 
 var appState = {
     departure: null,
     destination: null,
     lastResults: null,
-    selectedDay: null,
-    departureTimezone: null,
-    forecastPeriod: '06',
-    departureInfo: null
+    selectedDay: 0,       // 0 = today, 1 = tomorrow, etc.
+    departureTime: '',    // military time string e.g. "1430"
+    forecastHr: '06'      // NOAA forecast period: '06','12','24'
 };
 
 // ============================================================
@@ -23,8 +21,7 @@ function initApp() {
 
     var csvUrls = [
         'us-airports.csv',
-        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv',
-        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/main/us-airports.csv'
+        'data/us-airports.csv'
     ];
 
     tryLoadAirports(csvUrls, 0, function(err) {
@@ -36,12 +33,6 @@ function initApp() {
 
         setupAutocomplete('dep-input', 'dep-dropdown', 'dep-info', function(apt) {
             appState.departure = apt;
-            if (apt) {
-                resolveDepTimezone(apt);
-            } else {
-                appState.departureTimezone = null;
-                document.getElementById('depTimezoneLabel').textContent = 'local';
-            }
             checkReady();
         });
         setupAutocomplete('dest-input', 'dest-dropdown', 'dest-info', function(apt) {
@@ -49,10 +40,11 @@ function initApp() {
             checkReady();
         });
 
+        document.getElementById('btn-calc').addEventListener('click', runCalculation);
+
         initDaySelector();
         initTimeInput();
 
-        document.getElementById('btn-calc').addEventListener('click', runCalculation);
         document.getElementById('dep-input').focus();
     });
 }
@@ -72,149 +64,125 @@ function tryLoadAirports(urls, idx, callback) {
     });
 }
 
+
 // ============================================================
-// DAY SELECTOR — 7 pills starting from Today
+// DAY & TIME SELECTOR
 // ============================================================
 function initDaySelector() {
-    var row = document.getElementById('daySelectorRow');
-    if (!row) return;
+    var container = document.getElementById('day-pills');
+    if (!container) return;
 
-    var days = getDayOptions();
-    row.innerHTML = '';
-
-    for (var i = 0; i < days.length; i++) {
-        var btn = document.createElement('button');
-        btn.className = 'day-pill' + (i === 0 ? ' active' : '');
-        btn.textContent = days[i].label;
-        btn.setAttribute('data-day-index', i);
-
-        (function(dayObj, button) {
-            button.addEventListener('click', function() {
-                var pills = row.querySelectorAll('.day-pill');
-                for (var p = 0; p < pills.length; p++) {
-                    pills[p].classList.remove('active');
-                }
-                button.classList.add('active');
-                appState.selectedDay = dayObj.date;
-                updateZuluDisplay();
-            });
-        })(days[i], btn);
-
-        row.appendChild(btn);
+    var days = ['Today', 'Tmrw'];
+    var now = new Date();
+    for (var i = 2; i < 7; i++) {
+        var d = new Date(now);
+        d.setDate(d.getDate() + i);
+        days.push(d.toLocaleDateString('en-US', { weekday: 'short' }));
     }
 
-    appState.selectedDay = days[0].date;
+    container.innerHTML = '';
+    for (var j = 0; j < days.length; j++) {
+        var pill = document.createElement('button');
+        pill.className = 'day-pill' + (j === 0 ? ' active' : '');
+        pill.textContent = days[j];
+        pill.dataset.day = j;
+        pill.addEventListener('click', function() {
+            container.querySelectorAll('.day-pill').forEach(function(p) {
+                p.classList.remove('active');
+            });
+            this.classList.add('active');
+            appState.selectedDay = parseInt(this.dataset.day);
+            updateForecastPeriod();
+            updateZuluDisplay();
+        });
+        container.appendChild(pill);
+    }
 }
 
-// ============================================================
-// TIME INPUT — Military time entry + Zulu conversion
-// ============================================================
 function initTimeInput() {
-    var input = document.getElementById('depTimeInput');
+    var input = document.getElementById('dep-time');
     if (!input) return;
 
+    // Default to current time rounded to next 30 min
+    var now = new Date();
+    var mins = now.getMinutes();
+    var roundedMins = mins < 30 ? 30 : 0;
+    var hrs = mins < 30 ? now.getHours() : now.getHours() + 1;
+    if (hrs >= 24) hrs = 0;
+    appState.departureTime = padTwo(hrs) + padTwo(roundedMins);
+    input.value = appState.departureTime;
+
     input.addEventListener('input', function() {
-        var val = input.value.replace(/[^0-9]/g, '');
-        if (val.length > 4) val = val.substring(0, 4);
-        input.value = val;
-
-        if (val.length === 4) {
-            var hrs = parseInt(val.substring(0, 2));
-            var mins = parseInt(val.substring(2, 4));
-            if (hrs > 23 || mins > 59) {
-                input.classList.add('invalid');
-                document.getElementById('depZuluDisplay').textContent = '----Z';
-                return;
-            }
-            input.classList.remove('invalid');
-            updateZuluDisplay();
-        } else {
-            document.getElementById('depZuluDisplay').textContent = '----Z';
-            updateForecastIndicator(null);
-        }
-    });
-
-    input.addEventListener('blur', function() {
-        var val = input.value.replace(/[^0-9]/g, '');
-        if (val.length > 0 && val.length < 4) {
-            while (val.length < 4) val = '0' + val;
-            input.value = val;
-            updateZuluDisplay();
-        }
-    });
-}
-
-// ============================================================
-// TIMEZONE RESOLUTION
-// ============================================================
-async function resolveDepTimezone(apt) {
-    var tzLabel = document.getElementById('depTimezoneLabel');
-    tzLabel.textContent = '...';
-
-    try {
-        var tz = await getAirportTimezone(apt.ident, apt.lat, apt.lon);
-        appState.departureTimezone = tz;
-        var abbr = getTimezoneAbbr(tz, appState.selectedDay || new Date());
-        tzLabel.textContent = abbr || 'local';
+        appState.departureTime = input.value.replace(/[^0-9]/g, '').substring(0, 4);
+        updateForecastPeriod();
         updateZuluDisplay();
-    } catch (err) {
-        console.warn('Timezone detection failed:', err);
-        appState.departureTimezone = null;
-        tzLabel.textContent = 'local';
-    }
+    });
+
+    updateForecastPeriod();
+    updateZuluDisplay();
 }
 
+function padTwo(n) {
+    return (n < 10 ? '0' : '') + n;
+}
+
+
 // ============================================================
-// ZULU DISPLAY + FORECAST PERIOD
+// ZULU TIME & FORECAST PERIOD
 // ============================================================
+function getDepDateTime() {
+    var now = new Date();
+    var depDate = new Date(now);
+    depDate.setDate(depDate.getDate() + appState.selectedDay);
+
+    var timeStr = appState.departureTime || '0000';
+    while (timeStr.length < 4) timeStr = '0' + timeStr;
+    var hrs = parseInt(timeStr.substring(0, 2)) || 0;
+    var mins = parseInt(timeStr.substring(2, 4)) || 0;
+    depDate.setHours(hrs, mins, 0, 0);
+
+    return depDate;
+}
+
 function updateZuluDisplay() {
-    var input = document.getElementById('depTimeInput');
-    var zuluEl = document.getElementById('depZuluDisplay');
-    var timeVal = (input ? input.value : '').replace(/[^0-9]/g, '');
+    var zuluEl = document.getElementById('zulu-display');
+    if (!zuluEl) return;
 
-    if (timeVal.length < 4 || !appState.departureTimezone || !appState.selectedDay) {
-        zuluEl.textContent = '----Z';
-        updateForecastIndicator(null);
-        return;
-    }
-
-    var hrs = parseInt(timeVal.substring(0, 2));
-    var mins = parseInt(timeVal.substring(2, 4));
-    if (hrs > 23 || mins > 59) {
-        zuluEl.textContent = '----Z';
-        updateForecastIndicator(null);
-        return;
-    }
-
-    var info = computeDepartureInfo(timeVal, appState.selectedDay, appState.departureTimezone);
-    appState.departureInfo = info;
-    appState.forecastPeriod = info.forecastPeriod;
-
-    zuluEl.textContent = info.zuluString;
-    updateForecastIndicator(info);
+    var depLocal = getDepDateTime();
+    var zuluHrs = depLocal.getUTCHours();
+    var zuluMins = depLocal.getUTCMinutes();
+    zuluEl.textContent = padTwo(zuluHrs) + padTwo(zuluMins) + 'Z';
 }
 
-function updateForecastIndicator(info) {
-    var el = document.getElementById('forecastIndicator');
-    if (!el) return;
+function updateForecastPeriod() {
+    var depLocal = getDepDateTime();
+    var now = new Date();
+    var hoursOut = (depLocal - now) / (1000 * 60 * 60);
 
-    if (!info) {
-        el.innerHTML = '';
-        el.style.display = 'none';
-        return;
-    }
-
-    el.style.display = 'block';
-
-    if (info.isPast) {
-        el.innerHTML = '<span class="forecast-warn">⚠ Departure time is in the past</span>';
-    } else if (info.hoursOut > 30) {
-        el.innerHTML = '<span class="forecast-warn">⚠ Beyond 30hr forecast window — winds may be less accurate</span>';
+    // Pick best NOAA forecast period
+    if (hoursOut <= 6) {
+        appState.forecastHr = '06';
+    } else if (hoursOut <= 12) {
+        appState.forecastHr = '12';
+    } else if (hoursOut <= 24) {
+        appState.forecastHr = '24';
     } else {
-        el.innerHTML = '<span class="forecast-ok">Using NOAA ' + info.forecastLabel +
-            ' (' + info.hoursOut.toFixed(1) + 'hr out)</span>';
+        appState.forecastHr = '24'; // best we have
+    }
+
+    // Update forecast indicator
+    var indEl = document.getElementById('forecast-indicator');
+    if (indEl) {
+        if (hoursOut > 30) {
+            indEl.className = 'forecast-badge forecast-warn';
+            indEl.textContent = appState.forecastHr + 'hr (>30hr out)';
+        } else {
+            indEl.className = 'forecast-badge forecast-ok';
+            indEl.textContent = appState.forecastHr + 'hr fcst';
+        }
     }
 }
+
 
 // ============================================================
 // AUTOCOMPLETE
@@ -331,8 +299,9 @@ function escHTML(s) {
     return d.innerHTML;
 }
 
+
 // ============================================================
-// CALCULATION
+// CALCULATION — Async with wind integration
 // ============================================================
 function checkReady() {
     var btn = document.getElementById('btn-calc');
@@ -346,40 +315,35 @@ async function runCalculation() {
     var dest = appState.destination;
     var btn = document.getElementById('btn-calc');
 
+    // Show loading state
     btn.disabled = true;
     btn.textContent = 'Calculating...';
-    updateStatus('loading', 'Fetching winds aloft...');
-    updateWindStatusFooter('loading');
+    updateWindStatus('loading', 'Fetching winds aloft...');
 
     try {
-        var forecastHr = appState.forecastPeriod || '06';
-        var results = await calculateAltitudeOptions(dep, dest, forecastHr);
+        // Async call — fetches winds and calculates
+        var results = await calculateAltitudeOptions(dep, dest, appState.forecastHr);
         appState.lastResults = results;
 
+        // Update wind status
         if (results.windStatus === 'ok') {
-            updateStatus('ok', 'Winds loaded (' + results.windStations + ' stations)');
-            updateWindStatusFooter('ok', results.windStations);
-        } else if (results.windStatus === 'error') {
-            updateStatus('ok', 'Calculated (winds unavailable)');
-            updateWindStatusFooter('error');
-        } else if (results.windStatus === 'no-stations') {
-            updateStatus('ok', 'Calculated (no wind stations on route)');
-            updateWindStatusFooter('no-stations');
+            updateWindStatus('ok', 'Winds applied (' + results.windStationCount + ' stations)');
+        } else if (results.windStatus === 'failed') {
+            updateWindStatus('warn', 'Wind fetch failed — using TAS only');
         } else {
-            updateStatus('ok', 'Calculated (no wind correction)');
-            updateWindStatusFooter('none');
+            updateWindStatus('none', 'No wind correction');
         }
 
         displayResults(results, dep, dest);
     } catch (err) {
-        console.error('Calculation error:', err);
-        updateStatus('error', 'Calculation failed');
-        updateWindStatusFooter('error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = 'Calculate Flight Plan';
+        console.error('[APP] Calculation error:', err);
+        updateWindStatus('warn', 'Error: ' + err.message);
     }
+
+    btn.disabled = false;
+    btn.textContent = 'Calculate Flight Plan';
 }
+
 
 // ============================================================
 // RESULTS DISPLAY
@@ -390,57 +354,49 @@ function displayResults(results, dep, dest) {
 
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
 
-    document.getElementById('sum-route').textContent = dep.ident + ' → ' + dest.ident;
+    // Route summary
     document.getElementById('sum-dist').textContent = Math.round(totalDist);
-    document.getElementById('sum-course').textContent = results.trueCourse + '°';
-    document.getElementById('sum-magcourse').textContent = results.magCourse + '°';
-    document.getElementById('sum-dir').textContent = results.direction;
 
+    var courseEl = document.getElementById('sum-course');
+    if (courseEl) courseEl.textContent = results.trueCourse + '°';
+
+    var magEl = document.getElementById('sum-mag-course');
+    if (magEl) magEl.textContent = results.magCourse + '°M';
+
+    var dirEl = document.getElementById('sum-dir');
+    if (dirEl) dirEl.textContent = results.direction;
+
+    // Fuel stop check
     var fuelStopEl = document.getElementById('fuel-stop-indicator');
-    if (needsFuelStop(results)) {
-        fuelStopEl.innerHTML = '<span class="fuel-stop-badge">Fuel Stop Required</span>';
-    } else {
-        fuelStopEl.innerHTML = '';
-    }
-
-    var windBar = document.getElementById('wind-status-bar');
-    if (windBar) {
-        if (results.windStatus === 'ok') {
-            windBar.innerHTML = '<span class="wind-ok">✓ Winds aloft active — ' +
-                results.windStations + ' station' + (results.windStations > 1 ? 's' : '') +
-                ' along route</span>';
-            windBar.style.display = 'block';
-        } else if (results.windStatus === 'error' || results.windStatus === 'no-stations') {
-            windBar.innerHTML = '<span class="wind-warn">⚠ No wind data — GS = TAS (no correction)</span>';
-            windBar.style.display = 'block';
+    if (fuelStopEl) {
+        if (needsFuelStop(results)) {
+            fuelStopEl.innerHTML = '<span class="fuel-stop-badge">Fuel Stop Required</span>';
         } else {
-            windBar.innerHTML = '';
-            windBar.style.display = 'none';
+            fuelStopEl.innerHTML = '';
         }
     }
 
+    // Altitude options table
     var tbody = document.getElementById('alt-table-body');
     tbody.innerHTML = '';
 
-    var bestIdx = 0;
-    for (var i = 1; i < results.options.length; i++) {
-        if (results.options[i].totals.timeMin < results.options[bestIdx].totals.timeMin) {
-            bestIdx = i;
-        }
-    }
-
+    // Best option is first (already sorted by time)
     for (var i = 0; i < results.options.length; i++) {
         var plan = results.options[i];
         var tr = document.createElement('tr');
-        if (i === bestIdx) tr.className = 'best';
+        if (i === 0) tr.className = 'best';
 
-        var gsText = Math.round(plan.cruise.groundSpeed);
+        // Determine GS class based on wind
         var gsClass = '';
-        if (plan.cruise.wind && plan.cruise.wind.available) {
-            if (plan.cruise.wind.windComponent > 0) {
+        var gsDelta = '';
+        if (plan.windSummary && plan.windSummary.available) {
+            var comp = plan.windSummary.windComponent;
+            if (comp > 2) {
                 gsClass = ' class="gs-headwind"';
-            } else if (plan.cruise.wind.windComponent < 0) {
+                gsDelta = '<span class="gs-delta">−' + comp + '</span>';
+            } else if (comp < -2) {
                 gsClass = ' class="gs-tailwind"';
+                gsDelta = '<span class="gs-delta">+' + Math.abs(comp) + '</span>';
             }
         }
 
@@ -449,27 +405,34 @@ function displayResults(results, dep, dest) {
             '<td>' + plan.totals.timeHrs + '</td>' +
             '<td>' + plan.totals.fuelGal + '</td>' +
             '<td>' + plan.cruise.tas + '</td>' +
-            '<td' + gsClass + '>' + gsText + '</td>';
+            '<td' + gsClass + '>' + Math.round(plan.cruise.groundSpeed) + gsDelta + '</td>';
+
         tr.addEventListener('click', (function(p) {
             return function() { displayPhaseDetail(p); };
         })(plan));
         tbody.appendChild(tr);
     }
 
-    displayPhaseDetail(results.options[bestIdx]);
+    // Auto-show phase detail for best option
+    displayPhaseDetail(results.options[0]);
+
     section.scrollIntoView({ behavior: 'smooth' });
 }
 
 function displayPhaseDetail(plan) {
     var el = document.getElementById('phase-detail');
 
+    // Wind info line for cruise phase
     var windLine = '';
-    if (plan.cruise.wind && plan.cruise.wind.available) {
-        var w = plan.cruise.wind;
-        windLine = '<div class="phase-wind-info">' +
-            'Wind: ' + w.description +
-            ' | TAS ' + plan.cruise.tas + 'kt → GS ' + Math.round(plan.cruise.groundSpeed) + 'kt' +
-            ' (' + w.stationCount + ' stn' + (w.stationCount > 1 ? 's' : '') + ')' +
+    if (plan.windSummary && plan.windSummary.available) {
+        var wc = plan.windSummary.windComponent;
+        var windClass = wc > 0 ? 'headwind' : 'tailwind';
+        var windArrow = wc > 0 ? '↑' : '↓';
+        windLine = '<div class="phase-wind-info ' + windClass + '">' +
+            '<span class="wind-arrow">' + windArrow + '</span>' +
+            '<span class="wind-value">' + plan.windSummary.description + '</span>' +
+            ' · GS ' + plan.windSummary.gs + 'kt' +
+            ' (' + plan.windSummary.stationCount + ' stn)' +
             '</div>';
     }
 
@@ -482,14 +445,14 @@ function displayPhaseDetail(plan) {
         phaseRow('Taxi', '—', plan.totals.taxiFuel + 'g', '—') +
         phaseRow('Climb', formatTime(plan.climb.timeMin), plan.climb.fuelGal + 'g', plan.climb.distanceNM + 'nm') +
         phaseRow('Cruise', formatTime(plan.cruise.timeMin), plan.cruise.fuelGal + 'g', plan.cruise.distanceNM + 'nm') +
+        windLine +
         phaseRow('Descent', formatTime(plan.descent.timeMin), plan.descent.fuelGal + 'g', plan.descent.distanceNM + 'nm') +
         '<div class="phase-row" style="border-top:1px solid var(--border);padding-top:8px;font-weight:700;">' +
             '<div class="phase-name">Total</div>' +
             '<div class="phase-value">' + plan.totals.timeHrs + '</div>' +
             '<div class="phase-value">' + plan.totals.fuelGal + 'g</div>' +
             '<div class="phase-value">' + plan.distance + 'nm</div>' +
-        '</div>' +
-        windLine;
+        '</div>';
 }
 
 function phaseRow(name, time, fuel, dist) {
@@ -501,37 +464,37 @@ function phaseRow(name, time, fuel, dist) {
     '</div>';
 }
 
+
 // ============================================================
-// STATUS BAR
+// STATUS BAR & WIND STATUS
 // ============================================================
 function updateStatus(state, msg) {
     var dot = document.getElementById('status-dot');
     var text = document.getElementById('status-text');
-    dot.className = 'status-dot ' + state;
-    text.textContent = msg;
+    if (dot) dot.className = 'status-dot ' + state;
+    if (text) text.textContent = msg;
 }
 
-function updateWindStatusFooter(status, stationCount) {
-    var el = document.getElementById('wind-status-footer');
-    if (!el) return;
+function updateWindStatus(state, msg) {
+    // Top wind status bar (inside results card)
+    var bar = document.getElementById('wind-status-bar');
+    if (bar) {
+        var dotClass = state === 'ok' ? 'ok' : (state === 'loading' ? 'loading' : 'error');
+        var barClass = state === 'ok' ? 'wind-ok' : 'wind-warn';
+        bar.className = 'wind-status-bar ' + barClass;
+        bar.innerHTML = '<span class="status-dot ' + dotClass + '"></span>' + escHTML(msg);
+        bar.style.display = 'flex';
+    }
 
-    if (status === 'ok') {
-        el.textContent = 'Winds: ' + stationCount + ' stations';
-        el.className = 'wind-footer-ok';
-    } else if (status === 'loading') {
-        el.textContent = 'Fetching winds...';
-        el.className = '';
-    } else if (status === 'error') {
-        el.textContent = 'Winds unavailable';
-        el.className = 'wind-footer-warn';
-    } else if (status === 'no-stations') {
-        el.textContent = 'No wind stations';
-        el.className = 'wind-footer-warn';
-    } else {
-        el.textContent = 'No wind correction';
-        el.className = '';
+    // Bottom status bar footer
+    var footer = document.getElementById('wind-status-footer');
+    if (footer) {
+        var footerClass = state === 'ok' ? 'wind-footer-ok' : 'wind-footer-warn';
+        footer.className = 'wind-status-footer ' + footerClass;
+        footer.innerHTML = '<span class="status-dot ' + (state === 'ok' ? 'ok' : 'error') + '"></span>' + escHTML(msg);
     }
 }
+
 
 // ============================================================
 // INIT ON LOAD

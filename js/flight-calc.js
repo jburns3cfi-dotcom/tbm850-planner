@@ -9,8 +9,7 @@
 // dest: { ident, lat, lon, elevation }
 // cruiseAlt: altitude in feet MSL
 // groundSpeed: optional wind-corrected GS (null = use TAS)
-// windSummary: optional wind info object for display
-function calculateFlight(dep, dest, cruiseAlt, groundSpeed, windSummary) {
+function calculateFlight(dep, dest, cruiseAlt, groundSpeed) {
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
 
@@ -22,9 +21,8 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed, windSummary) {
 
     // Phase 3: Cruise (remaining distance)
     var cruiseDist = totalDist - climb.distanceNM - descent.distanceNM;
-    if (cruiseDist < 0) {
-        cruiseDist = 0;
-    }
+    if (cruiseDist < 0) cruiseDist = 0;
+
     var cruise = calculateCruise(cruiseDist, cruiseAlt, groundSpeed);
 
     // Totals
@@ -43,8 +41,7 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed, windSummary) {
             timeMin:    cruise.timeMin,
             fuelGal:    cruise.fuelGal,
             tas:        cruise.tas,
-            groundSpeed: groundSpeed || cruise.tas,
-            wind:       windSummary || null
+            groundSpeed: groundSpeed || cruise.tas
         },
         descent:     descent,
         totals: {
@@ -56,68 +53,81 @@ function calculateFlight(dep, dest, cruiseAlt, groundSpeed, windSummary) {
     };
 }
 
-// Calculate flights at multiple altitudes for comparison
-// Now async — fetches wind data then calculates all options
-// dep/dest: airport objects with ident, lat, lon, elevation
-// forecastHr: '06', '12', or '24' (from existing day/time logic)
-//   If null/undefined, calculates without wind correction
+// ============================================================
+// ASYNC ALTITUDE OPTIONS — Wind-aware, best 3 by time
+// ============================================================
+// Calculates all 4 valid altitudes for the course direction,
+// fetches winds aloft, applies GS correction, returns best 3.
+// forecastHr: '06', '12', or '24' — NOAA forecast period
+// ============================================================
 async function calculateAltitudeOptions(dep, dest, forecastHr) {
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
-    var altitudes = getTop3Altitudes(trueCourse);
+    var magCourse = trueCourse; // Will be corrected if getMagneticVariation exists
+    if (typeof getMagneticVariation === 'function') {
+        var midLat = (dep.lat + dest.lat) / 2;
+        var midLon = (dep.lon + dest.lon) / 2;
+        var magVar = getMagneticVariation(midLat, midLon);
+        magCourse = (trueCourse - magVar + 360) % 360;
+    }
 
-    // Attempt to fetch wind data
-    var routeWindData = null;
+    // Get all valid altitudes (4 for the direction), not just top 3
+    var allAltitudes = getValidAltitudes(trueCourse, 24000, 31000);
+
+    // Fetch winds aloft
+    var windData = null;
     var windStatus = 'none';
-
     if (forecastHr) {
         try {
-            routeWindData = await fetchRouteWinds(dep, dest, forecastHr);
-            if (routeWindData && routeWindData.stationList.length > 0) {
-                windStatus = 'ok';
-                console.log('Wind data loaded: ' + routeWindData.stationList.length + ' stations');
-            } else {
-                windStatus = 'no-stations';
-                console.warn('Wind fetch returned no usable stations');
-            }
+            windData = await fetchRouteWinds(dep, dest, forecastHr);
+            windStatus = windData ? 'ok' : 'failed';
         } catch (err) {
-            windStatus = 'error';
-            console.error('Wind fetch error:', err);
+            console.error('[CALC] Wind fetch error:', err);
+            windStatus = 'failed';
         }
     }
 
-    // Calculate each altitude option with wind correction
-    var results = [];
-    for (var i = 0; i < altitudes.length; i++) {
-        var alt = altitudes[i];
-        var perf = getPerformanceAtAltitude(alt);
+    if (windData) {
+        console.log('[CALC] Wind data available — applying GS corrections');
+    } else {
+        console.log('[CALC] No wind data — using TAS for ground speed');
+    }
+
+    // Calculate flight plan for each altitude
+    var options = [];
+    for (var i = 0; i < allAltitudes.length; i++) {
+        var alt = allAltitudes[i];
+
+        // Get TAS at this altitude from performance table
+        var tas = getCruiseTAS(alt);
+
+        // Calculate wind-corrected ground speed
         var gs = null;
-        var windInfo = null;
-
-        if (routeWindData) {
-            windInfo = getWindSummary(routeWindData, alt, trueCourse, perf.cruiseTAS);
-            if (windInfo.available) {
-                gs = windInfo.gs;
-            }
+        var windSummary = null;
+        if (windData) {
+            gs = calculateGroundSpeed(windData, alt, trueCourse, tas);
+            windSummary = getWindSummary(windData, alt, trueCourse, tas);
         }
 
-        var plan = calculateFlight(dep, dest, alt, gs, windInfo);
-        results.push(plan);
+        var plan = calculateFlight(dep, dest, alt, gs);
+        plan.windSummary = windSummary;
+        options.push(plan);
     }
 
-    // Sort by total time (wind-adjusted) and keep best 3
-    results.sort(function(a, b) { return a.totals.timeMin - b.totals.timeMin; });
-    results = results.slice(0, 3);
+    // Sort by total time (shortest first)
+    options.sort(function(a, b) {
+        return a.totals.timeMin - b.totals.timeMin;
+    });
 
-    // Magnetic course at departure point
-    var magCourse = Math.round(trueToMagnetic(trueCourse, dep.lat, dep.lon));
+    // Return best 3
+    var best3 = options.slice(0, 3);
 
     return {
         trueCourse: Math.round(trueCourse),
-        magCourse: magCourse,
+        magCourse: Math.round(magCourse),
         direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
-        options: results,
         windStatus: windStatus,
-        windStations: routeWindData ? routeWindData.stationList.length : 0
+        windStationCount: windData ? windData.stationList.length : 0,
+        options: best3
     };
 }
 
