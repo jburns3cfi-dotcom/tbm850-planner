@@ -648,7 +648,7 @@ function calculateGFSGroundSpeed(gfsData, cruiseAltFt, trueCourse, tas) {
 
         // Wind components relative to aircraft track
         var comp = windComponents(wind.direction, wind.speed, trueCourse);
-        var segGS = Math.max(50, tas - comp.headwind);
+        var segGS = windTriangleGS(tas, wind.direction, wind.speed, trueCourse);
 
         segments.push({
             dist: segDist,
@@ -709,7 +709,7 @@ function getGFSWindSummary(gfsData, cruiseAltFt, trueCourse, tas) {
         if (segDist <= 0) continue;
 
         var comp = windComponents(wind.direction, wind.speed, trueCourse);
-        var segGS = Math.max(50, tas - comp.headwind);
+        var segGS = windTriangleGS(tas, wind.direction, wind.speed, trueCourse);
         var segTime = segDist / segGS;
 
         totalTime += segTime;
@@ -727,15 +727,17 @@ function getGFSWindSummary(gfsData, cruiseAltFt, trueCourse, tas) {
     }
 
     var effectiveGS = Math.round(totalDist / totalTime);
-    var avgHeadwind = Math.round(weightedHeadwind / totalTime);
-    var desc = avgHeadwind > 0
-        ? avgHeadwind + 'kt headwind'
-        : Math.abs(avgHeadwind) + 'kt tailwind';
+    // Derive effective wind component from actual GS vs TAS
+    // This accounts for the crosswind crab penalty
+    var effectiveHeadwind = Math.round(tas - effectiveGS);
+    var desc = effectiveHeadwind > 0
+        ? effectiveHeadwind + 'kt headwind'
+        : Math.abs(effectiveHeadwind) + 'kt tailwind';
 
     return {
         available: true,
         gs: effectiveGS,
-        windComponent: avgHeadwind,
+        windComponent: effectiveHeadwind,
         stationCount: count,
         description: desc,
         source: 'GFS ' + gfsData.cycle

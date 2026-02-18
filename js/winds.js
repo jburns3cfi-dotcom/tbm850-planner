@@ -239,7 +239,7 @@ function calculateGroundSpeed(routeWindData, cruiseAlt, trueCourse, tas) {
         if (segDist <= 0) continue;
 
         var comp = windComponents(validStations[j].wind.direction, validStations[j].wind.speed, trueCourse);
-        var segGS = Math.max(50, tas - comp.headwind);
+        var segGS = windTriangleGS(tas, validStations[j].wind.direction, validStations[j].wind.speed, trueCourse);
 
         totalTime += segDist / segGS;
         coveredDist += segDist;
@@ -565,6 +565,42 @@ function windComponents(windDir, windSpd, courseTrue) {
 
 
 // ============================================================
+// WIND TRIANGLE GROUND SPEED
+// ============================================================
+// Full wind triangle: accounts for crosswind crab penalty.
+//
+// Simple formula (what we had):
+//   GS = TAS - headwind_component
+//   Ignores crosswind → 16kt error when 95kt wind crosses at 88°
+//
+// Wind triangle formula:
+//   GS = √(TAS² - crosswind²) - headwind
+//   Crosswind forces crab angle, reducing ground speed
+//   even when headwind component is near zero.
+//
+// This matches how fltplan.com and ForeFlight compute GS.
+// ============================================================
+function windTriangleGS(tas, windDir, windSpd, courseTrue) {
+    var angleDiff = (windDir - courseTrue) * (Math.PI / 180);
+    var headwind = windSpd * Math.cos(angleDiff);   // positive = headwind
+    var crosswind = windSpd * Math.sin(angleDiff);  // signed
+
+    // TAS must exceed crosswind for valid triangle
+    var tasSquared = tas * tas;
+    var crossSquared = crosswind * crosswind;
+
+    if (crossSquared >= tasSquared) {
+        // Wind exceeds TAS perpendicular — aircraft can't maintain track
+        // Shouldn't happen for TBM at FL240+ but handle gracefully
+        return Math.max(50, tas - Math.abs(headwind));
+    }
+
+    var gs = Math.sqrt(tasSquared - crossSquared) - headwind;
+    return Math.max(50, Math.round(gs));
+}
+
+
+// ============================================================
 // WIND SUMMARY — Segment-based, cross-track weighted
 // ============================================================
 function getWindSummary(routeWindData, cruiseAlt, trueCourse, tas) {
@@ -615,7 +651,7 @@ function getWindSummary(routeWindData, cruiseAlt, trueCourse, tas) {
         if (segDist <= 0) continue;
 
         var comp = windComponents(validStations[j].wind.direction, validStations[j].wind.speed, trueCourse);
-        var segGS = Math.max(50, tas - comp.headwind);
+        var segGS = windTriangleGS(tas, validStations[j].wind.direction, validStations[j].wind.speed, trueCourse);
         var segTime = segDist / segGS;
 
         totalTime += segTime;
@@ -628,15 +664,15 @@ function getWindSummary(routeWindData, cruiseAlt, trueCourse, tas) {
     }
 
     var effectiveGS = Math.round(totalDist / totalTime);
-    var avgHeadwind = Math.round(weightedHeadwind / totalTime);
-    var desc = avgHeadwind > 0
-        ? avgHeadwind + 'kt headwind'
-        : Math.abs(avgHeadwind) + 'kt tailwind';
+    var effectiveHeadwind = Math.round(tas - effectiveGS);
+    var desc = effectiveHeadwind > 0
+        ? effectiveHeadwind + 'kt headwind'
+        : Math.abs(effectiveHeadwind) + 'kt tailwind';
 
     return {
         available: true,
         gs: effectiveGS,
-        windComponent: avgHeadwind,
+        windComponent: effectiveHeadwind,
         stationCount: validStations.length,
         description: desc,
         source: 'NOAA'
