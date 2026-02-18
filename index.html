@@ -62,15 +62,13 @@
             color: var(--text-label);
             white-space: nowrap;
         }
-        .dep-time-row input[type="time"] {
+        .dep-time-row input[type="text"] {
             font-size: 1rem;
             padding: 6px 10px;
             border-radius: 8px;
             border: 1px solid var(--border);
             background: var(--bg-card);
             color: var(--text);
-            -webkit-appearance: none;
-            width: 120px;
         }
         .dep-time-row .zulu-display {
             font-size: 0.75rem;
@@ -147,7 +145,7 @@
         <!-- Departure Time -->
         <div class="dep-time-row">
             <label for="dep-time">Departure (local):</label>
-            <input type="time" id="dep-time" value="09:00">
+            <input type="text" id="dep-time" value="0900" placeholder="0900" maxlength="4" inputmode="numeric" pattern="[0-2][0-9][0-5][0-9]" style="width:70px;text-align:center;font-family:'SF Mono','Menlo',monospace;letter-spacing:2px;">
             <span id="zulu-display" class="zulu-display">—Z</span>
         </div>
 
