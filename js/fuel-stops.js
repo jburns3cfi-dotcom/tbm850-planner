@@ -1,38 +1,43 @@
 // ============================================================
 // fuel-stops.js — TBM850 Fuel Stop Candidate Finder + Pricing
 // Must load BEFORE app.js in index.html
+// VERSION CHECK: Look for "[FuelStops] v3 loaded" in console
 // ============================================================
+console.log('[FuelStops] v3 loaded — CORS proxy + flexible lookup');
 
 const FuelStops = (() => {
     'use strict';
 
     // ----- Internal state -----
-    let caaData = null;        // {KXXX: {fbo, city, state, retail, caa_price}}
-    let caaLoaded = false;
-    let lastCandidates = [];   // Store last findCandidates result for enrichment
-    let fuelCache = {};        // Per-airport fuel cache {KXXX: {fbo, price, caaPrice, isCAA}}
+    var caaData = null;
+    var caaLoaded = false;
+    var lastCandidates = [];
+    var fuelCache = {};
 
     // ----- Constants -----
-    const PROXY = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
-    const CAA_URL = PROXY + encodeURIComponent('https://caa-fuel.jburns3cfi.workers.dev');
-    const AIRNAV_BASE = 'https://airnav-grab.jburns3cfi.workers.dev';
-    const CORRIDOR_NM = 30;
-    const MIN_FROM_DEP_NM = 200;
-    const DESCENT_BUFFER_NM = 60;   // Exclude airports this close to destination
+    var PROXY = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
+    var CAA_URL = PROXY + encodeURIComponent('https://caa-fuel.jburns3cfi.workers.dev');
+    var AIRNAV_BASE = 'https://airnav-grab.jburns3cfi.workers.dev';
+    var CORRIDOR_NM = 30;
+    var MIN_FROM_DEP_NM = 200;
+    var DESCENT_BUFFER_NM = 60;
 
     // =========================================================
-    // AUTO-FETCH CAA DATA ON SCRIPT LOAD
+    // AUTO-FETCH CAA DATA ON SCRIPT LOAD (through proxy)
     // =========================================================
     (function autoFetchCAA() {
+        console.log('[FuelStops] Fetching CAA via proxy:', CAA_URL);
         fetch(CAA_URL)
-            .then(r => r.json())
-            .then(data => {
+            .then(function(r) {
+                console.log('[FuelStops] CAA response status:', r.status);
+                return r.json();
+            })
+            .then(function(data) {
                 if (data.success && data.airports) {
                     caaData = data.airports;
                     caaLoaded = true;
-                    // Pre-populate fuelCache with CAA data
-                    for (const ident in caaData) {
-                        const a = caaData[ident];
+                    for (var ident in caaData) {
+                        var a = caaData[ident];
                         fuelCache[ident] = {
                             fbo: a.fbo,
                             price: a.caa_price,
@@ -42,139 +47,157 @@ const FuelStops = (() => {
                             source: 'CAA'
                         };
                     }
-                    console.log(`[FuelStops] CAA data loaded: ${data.count} airports`);
-                    // If table is already rendered, enhance it now
+                    console.log('[FuelStops] CAA data loaded: ' + data.count + ' airports');
                     enhanceFuelTable();
+                } else {
+                    console.warn('[FuelStops] CAA response unexpected:', JSON.stringify(data).substring(0, 200));
                 }
             })
-            .catch(err => console.warn('[FuelStops] CAA fetch failed:', err));
+            .catch(function(err) { console.warn('[FuelStops] CAA fetch failed:', err); });
     })();
 
     // =========================================================
     // MATH HELPERS
     // =========================================================
-    const toRad = d => d * Math.PI / 180;
-    const toDeg = r => r * 180 / Math.PI;
+    function toRad(d) { return d * Math.PI / 180; }
 
     function haversineNM(lat1, lon1, lat2, lon2) {
-        const R = 3440.065; // Earth radius in nautical miles
-        const dLat = toRad(lat2 - lat1);
-        const dLon = toRad(lon2 - lon1);
-        const a = Math.sin(dLat / 2) ** 2 +
-                  Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-                  Math.sin(dLon / 2) ** 2;
+        var R = 3440.065;
+        var dLat = toRad(lat2 - lat1);
+        var dLon = toRad(lon2 - lon1);
+        var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
         return 2 * R * Math.asin(Math.sqrt(a));
     }
 
     function crossTrackDistNM(aptLat, aptLon, depLat, depLon, destLat, destLon) {
-        // Cross-track distance from a point to the great circle path dep→dest
-        const R = 3440.065;
-        const d13 = haversineNM(depLat, depLon, aptLat, aptLon) / R; // angular dist dep→apt
-        const brng13 = bearingRad(depLat, depLon, aptLat, aptLon);
-        const brng12 = bearingRad(depLat, depLon, destLat, destLon);
-        const xt = Math.asin(Math.sin(d13) * Math.sin(brng13 - brng12));
+        var R = 3440.065;
+        var d13 = haversineNM(depLat, depLon, aptLat, aptLon) / R;
+        var brng13 = bearingRad(depLat, depLon, aptLat, aptLon);
+        var brng12 = bearingRad(depLat, depLon, destLat, destLon);
+        var xt = Math.asin(Math.sin(d13) * Math.sin(brng13 - brng12));
         return Math.abs(xt * R);
     }
 
     function bearingRad(lat1, lon1, lat2, lon2) {
-        const dLon = toRad(lon2 - lon1);
-        const y = Math.sin(dLon) * Math.cos(toRad(lat2));
-        const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
-                  Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+        var dLon = toRad(lon2 - lon1);
+        var y = Math.sin(dLon) * Math.cos(toRad(lat2));
+        var x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+                Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
         return Math.atan2(y, x);
     }
+
+    // =========================================================
+    // RESOLVE IDENT — handles any format app.js might pass
+    // =========================================================
+    function resolveIdent(val) {
+        if (!val) return null;
+        if (typeof val === 'object' && val.ident) return val.ident;
+        if (typeof val === 'string') {
+            var upper = val.toUpperCase();
+            var match = upper.match(/\b([KP][A-Z0-9]{3})\b/);
+            return match ? match[1] : upper.trim().substring(0, 4);
+        }
+        return String(val);
+    }
+
+    // =========================================================
+    // FIND AIRPORT — tries multiple possible field names
+    // =========================================================
+    function findAirport(ident) {
+        if (!ident || typeof airportDB === 'undefined' || !airportDB) return null;
+        for (var i = 0; i < airportDB.length; i++) {
+            var a = airportDB[i];
+            if (a.ident === ident || a.icao === ident || a.gps_code === ident ||
+                a.id === ident || a.icao_code === ident) {
+                return a;
+            }
+        }
+        return null;
+    }
+
+    function getLat(apt) { return parseFloat(apt.latitude_deg || apt.lat || apt.latitude || 0); }
+    function getLon(apt) { return parseFloat(apt.longitude_deg || apt.lon || apt.longitude || 0); }
 
     // =========================================================
     // findCandidates — SYNCHRONOUS (app.js calls without await)
     // =========================================================
     function findCandidates(dep, dest, totalDist) {
+        console.log('[FuelStops] findCandidates called — dep type=' + typeof dep + ', dest type=' + typeof dest);
+        console.log('[FuelStops] dep raw value:', dep);
+        console.log('[FuelStops] dest raw value:', dest);
+
         if (typeof airportDB === 'undefined' || !airportDB || airportDB.length === 0) {
-            console.warn('[FuelStops] airportDB not loaded');
+            console.warn('[FuelStops] airportDB not loaded yet');
             return [];
         }
 
-        // Resolve dep/dest to ICAO codes — handle string, object, or display string
-        const resolveIdent = (val) => {
-            if (!val) return null;
-            if (typeof val === 'object' && val.ident) return val.ident;
-            if (typeof val === 'string') {
-                // Could be "KSTE" or "KSTE - Stevens Point..." — grab first 4-char token
-                const match = val.match(/\b([KP][A-Z0-9]{3})\b/);
-                return match ? match[1] : val.trim().substring(0, 4).toUpperCase();
-            }
-            return String(val);
-        };
+        var depIdent = resolveIdent(dep);
+        var destIdent = resolveIdent(dest);
+        console.log('[FuelStops] Resolved: ' + depIdent + ' -> ' + destIdent);
 
-        const depIdent = resolveIdent(dep);
-        const destIdent = resolveIdent(dest);
-
-        console.log(`[FuelStops] Searching candidates: ${depIdent} → ${destIdent}, totalDist=${totalDist}`);
-
-        // Find dep/dest in airportDB — try multiple field names
-        const findAirport = (ident) => {
-            return airportDB.find(a =>
-                a.ident === ident ||
-                a.icao === ident ||
-                a.gps_code === ident ||
-                a.id === ident
-            );
-        };
-
-        const depApt = findAirport(depIdent);
-        const destApt = findAirport(destIdent);
+        var depApt = findAirport(depIdent);
+        var destApt = findAirport(destIdent);
 
         if (!depApt || !destApt) {
-            console.warn(`[FuelStops] Could not find airports: dep=${depIdent} (${!!depApt}), dest=${destIdent} (${!!destApt})`);
-            // Log first airport's keys for debugging
+            console.warn('[FuelStops] LOOKUP FAILED — dep=' + depIdent + ' found=' + !!depApt + ', dest=' + destIdent + ' found=' + !!destApt);
             if (airportDB.length > 0) {
-                console.log('[FuelStops] Airport field names:', Object.keys(airportDB[0]).join(', '));
+                var sample = airportDB[0];
+                console.warn('[FuelStops] airportDB[0] keys: ' + Object.keys(sample).join(', '));
+                console.warn('[FuelStops] airportDB[0] ident=' + sample.ident + ', icao=' + sample.icao + ', gps_code=' + sample.gps_code);
+                // Brute-force search
+                for (var s = 0; s < airportDB.length; s++) {
+                    var vals = Object.values(airportDB[s]);
+                    for (var v = 0; v < vals.length; v++) {
+                        if (String(vals[v]).toUpperCase() === depIdent) {
+                            console.warn('[FuelStops] Found ' + depIdent + ' at index ' + s + ' via field scan');
+                            console.warn('[FuelStops] Entry:', JSON.stringify(airportDB[s]).substring(0, 300));
+                            break;
+                        }
+                    }
+                    if (String(vals[v]).toUpperCase() === depIdent) break; // stop outer loop too
+                }
             }
             return [];
         }
 
-        const depLat = parseFloat(depApt.latitude_deg || depApt.lat || depApt.latitude);
-        const depLon = parseFloat(depApt.longitude_deg || depApt.lon || depApt.longitude);
-        const destLat = parseFloat(destApt.latitude_deg || destApt.lat || destApt.latitude);
-        const destLon = parseFloat(destApt.longitude_deg || destApt.lon || destApt.longitude);
+        var depLat = getLat(depApt);
+        var depLon = getLon(depApt);
+        var destLat = getLat(destApt);
+        var destLon = getLon(destApt);
+        console.log('[FuelStops] Coords — dep: ' + depLat + ',' + depLon + ' dest: ' + destLat + ',' + destLon);
 
-        // Filter candidates
-        const inCorridor = [];
-        for (const apt of airportDB) {
-            // Skip departure, destination
-            const aptIdent = apt.ident || apt.icao || apt.gps_code || apt.id || '';
+        var inCorridor = [];
+        for (var i = 0; i < airportDB.length; i++) {
+            var apt = airportDB[i];
+            var aptIdent = apt.ident || apt.icao || apt.gps_code || apt.id || '';
+
             if (aptIdent === depIdent || aptIdent === destIdent) continue;
 
-            // Medium and large airports only
-            const t = (apt.type || '').toLowerCase();
+            var t = (apt.type || '').toLowerCase();
             if (t.indexOf('medium') === -1 && t.indexOf('large') === -1) continue;
 
-            // Must be in the US (ident starts with K and is 4 chars, or starts with P for Alaska/Hawaii)
             if (aptIdent.length !== 4) continue;
             if (aptIdent[0] !== 'K' && aptIdent[0] !== 'P') continue;
 
-            const aptLat = parseFloat(apt.latitude_deg || apt.lat || apt.latitude);
-            const aptLon = parseFloat(apt.longitude_deg || apt.lon || apt.longitude);
-            if (isNaN(aptLat) || isNaN(aptLon)) continue;
+            var aptLat = getLat(apt);
+            var aptLon = getLon(apt);
+            if (isNaN(aptLat) || isNaN(aptLon) || aptLat === 0 || aptLon === 0) continue;
 
-            const distFromDep = haversineNM(depLat, depLon, aptLat, aptLon);
-            const distFromDest = haversineNM(aptLat, aptLon, destLat, destLon);
+            var distFromDep = haversineNM(depLat, depLon, aptLat, aptLon);
+            var distFromDest = haversineNM(aptLat, aptLon, destLat, destLon);
 
-            // Must be ≥200nm from departure
             if (distFromDep < MIN_FROM_DEP_NM) continue;
-
-            // Skip if in descent profile (too close to destination)
             if (distFromDest < DESCENT_BUFFER_NM) continue;
 
-            // Cross-track (off-route) distance
-            const offRoute = crossTrackDistNM(aptLat, aptLon, depLat, depLon, destLat, destLon);
-
-            // Must be within corridor
+            var offRoute = crossTrackDistNM(aptLat, aptLon, depLat, depLon, destLat, destLon);
             if (offRoute > CORRIDOR_NM) continue;
 
             inCorridor.push({
                 airport: {
                     ident: aptIdent,
-                    name: apt.name,
+                    name: apt.name || '',
                     municipality: apt.municipality || '',
                     region: (apt.iso_region || apt.region || '').replace('US-', '')
                 },
@@ -184,26 +207,21 @@ const FuelStops = (() => {
             });
         }
 
-        // Sort: CAA airports first (if data loaded), then by off-route distance
-        inCorridor.sort((a, b) => {
+        // Sort: CAA airports first, then by off-route distance
+        inCorridor.sort(function(a, b) {
             if (caaLoaded) {
-                const aCAA = caaData[a.airport.ident] ? 1 : 0;
-                const bCAA = caaData[b.airport.ident] ? 1 : 0;
-                if (aCAA !== bCAA) return bCAA - aCAA; // CAA first
+                var aCAA = caaData[a.airport.ident] ? 1 : 0;
+                var bCAA = caaData[b.airport.ident] ? 1 : 0;
+                if (aCAA !== bCAA) return bCAA - aCAA;
             }
             return a.distOffRoute - b.distOffRoute;
         });
 
-        // Take top 8
-        const results = inCorridor.slice(0, 8);
+        var results = inCorridor.slice(0, 8);
+        console.log('[FuelStops] Found ' + results.length + ' candidates from ' + inCorridor.length + ' in corridor');
 
-        console.log(`[FuelStops] Found ${results.length} fuel stop candidates from ${inCorridor.length} in corridor`);
-
-        // Store for enrichment
         lastCandidates = results;
-
-        // Schedule async fuel enrichment after app.js renders the table
-        setTimeout(() => enhanceFuelTable(), 150);
+        setTimeout(function() { enhanceFuelTable(); }, 200);
 
         return results;
     }
@@ -211,27 +229,30 @@ const FuelStops = (() => {
     // =========================================================
     // FUEL DATA FETCHING
     // =========================================================
-    async function fetchAirNavFuel(ident) {
-        if (fuelCache[ident]) return fuelCache[ident];
-        try {
-            const resp = await fetch(`${PROXY}${encodeURIComponent(AIRNAV_BASE + '?id=' + ident)}`);
-            const data = await resp.json();
-            if (data.jetA && data.jetA.price) {
-                const info = {
-                    fbo: data.jetA.fbo || 'Unknown FBO',
-                    price: data.jetA.price,
-                    retailPrice: data.jetA.price,
-                    caaPrice: null,
-                    isCAA: false,
-                    source: 'AirNav'
-                };
-                fuelCache[ident] = info;
-                return info;
-            }
-        } catch (err) {
-            console.warn(`[FuelStops] AirNav fetch failed for ${ident}:`, err);
-        }
-        return null;
+    function fetchAirNavFuel(ident) {
+        if (fuelCache[ident]) return Promise.resolve(fuelCache[ident]);
+        var url = PROXY + encodeURIComponent(AIRNAV_BASE + '?id=' + ident);
+        return fetch(url)
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.jetA && data.jetA.price) {
+                    var info = {
+                        fbo: data.jetA.fbo || 'Unknown FBO',
+                        price: data.jetA.price,
+                        retailPrice: data.jetA.price,
+                        caaPrice: null,
+                        isCAA: false,
+                        source: 'AirNav'
+                    };
+                    fuelCache[ident] = info;
+                    return info;
+                }
+                return null;
+            })
+            .catch(function(err) {
+                console.warn('[FuelStops] AirNav failed for ' + ident + ':', err);
+                return null;
+            });
     }
 
     function getCachedFuel(ident) {
@@ -239,139 +260,127 @@ const FuelStops = (() => {
     }
 
     // =========================================================
-    // TABLE ENHANCEMENT — Self-contained, no app.js changes
+    // TABLE ENHANCEMENT
     // =========================================================
     function findFuelStopTable() {
-        // Strategy: find the table inside the fuel stops section
-        // Look for a table that has "FROM DEP" in a header cell
-        const tables = document.querySelectorAll('table');
-        for (const table of tables) {
-            const headerText = (table.querySelector('thead') || table).textContent || '';
-            if (headerText.indexOf('FROM DEP') !== -1 || headerText.indexOf('FUEL') !== -1) {
-                return table;
-            }
+        var tables = document.querySelectorAll('table');
+        for (var i = 0; i < tables.length; i++) {
+            var hdr = tables[i].querySelector('thead');
+            var txt = (hdr || tables[i]).textContent || '';
+            if (txt.indexOf('FROM DEP') !== -1) return tables[i];
         }
-        // Fallback: look for section/div with "fuel" in id or heading
-        const sections = document.querySelectorAll('[id*="fuel" i], [id*="stop" i]');
-        for (const sec of sections) {
-            const t = sec.querySelector('table');
+        var secs = document.querySelectorAll('[id*="fuel" i], [id*="stop" i]');
+        for (var j = 0; j < secs.length; j++) {
+            var t = secs[j].querySelector('table');
             if (t) return t;
         }
         return null;
     }
 
+    var enhanceRetries = 0;
+
     function enhanceFuelTable() {
         if (lastCandidates.length === 0) return;
 
-        const table = findFuelStopTable();
+        var table = findFuelStopTable();
         if (!table) {
-            // Table not rendered yet, retry
-            setTimeout(() => enhanceFuelTable(), 300);
+            enhanceRetries++;
+            if (enhanceRetries < 10) {
+                setTimeout(function() { enhanceFuelTable(); }, 300);
+            }
             return;
         }
+        enhanceRetries = 0;
 
-        // Check if already enhanced
         if (table.dataset.fuelEnhanced === 'true') {
-            // Already enhanced — just update pricing cells
             updatePricingCells();
             return;
         }
 
-        // Mark as enhanced
         table.dataset.fuelEnhanced = 'true';
+        console.log('[FuelStops] Enhancing fuel table with JET A + FBO columns');
 
-        // Add header columns
-        const thead = table.querySelector('thead');
+        var thead = table.querySelector('thead');
         if (thead) {
-            const headerRow = thead.querySelector('tr');
+            var headerRow = thead.querySelector('tr');
             if (headerRow) {
-                const thFuel = document.createElement('th');
+                var thFuel = document.createElement('th');
                 thFuel.textContent = 'JET A';
                 thFuel.style.cssText = 'text-align:right; white-space:nowrap;';
                 headerRow.appendChild(thFuel);
 
-                const thFBO = document.createElement('th');
+                var thFBO = document.createElement('th');
                 thFBO.textContent = 'FBO';
                 thFBO.style.cssText = 'text-align:left;';
                 headerRow.appendChild(thFBO);
             }
         }
 
-        // Add data cells to each row
-        const tbody = table.querySelector('tbody') || table;
-        const rows = tbody.querySelectorAll('tr');
-        let candidateIdx = 0;
+        var tbody = table.querySelector('tbody') || table;
+        var rows = tbody.querySelectorAll('tr');
+        var idx = 0;
 
-        for (const row of rows) {
-            // Skip header rows
+        for (var r = 0; r < rows.length; r++) {
+            var row = rows[r];
             if (row.querySelector('th')) continue;
-            if (candidateIdx >= lastCandidates.length) break;
+            if (idx >= lastCandidates.length) break;
 
-            const candidate = lastCandidates[candidateIdx];
-            const ident = candidate.airport.ident;
+            var ident = lastCandidates[idx].airport.ident;
 
-            // Fuel price cell
-            const tdFuel = document.createElement('td');
-            tdFuel.id = `fuel-price-${ident}`;
+            var tdFuel = document.createElement('td');
+            tdFuel.id = 'fuel-price-' + ident;
             tdFuel.style.cssText = 'text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums;';
 
-            // FBO cell
-            const tdFBO = document.createElement('td');
-            tdFBO.id = `fuel-fbo-${ident}`;
-            tdFBO.style.cssText = 'text-align:left; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+            var tdFBO = document.createElement('td');
+            tdFBO.id = 'fuel-fbo-' + ident;
+            tdFBO.style.cssText = 'text-align:left; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.85em;';
 
-            const cached = getCachedFuel(ident);
+            var cached = getCachedFuel(ident);
             if (cached) {
                 fillFuelCells(tdFuel, tdFBO, cached);
             } else {
-                tdFuel.innerHTML = '<span style="color:#888; font-size:0.85em;">loading…</span>';
+                tdFuel.innerHTML = '<span style="color:#888; font-size:0.85em;">loading\u2026</span>';
                 tdFBO.textContent = '';
-                // Fetch from AirNav
-                fetchAirNavFuel(ident).then(info => {
-                    if (info) {
-                        fillFuelCells(tdFuel, tdFBO, info);
-                    } else {
-                        tdFuel.innerHTML = '<span style="color:#999; font-size:0.85em;">—</span>';
-                        tdFBO.textContent = '';
-                    }
-                });
+                (function(id, pTd, fTd) {
+                    fetchAirNavFuel(id).then(function(info) {
+                        if (info) {
+                            fillFuelCells(pTd, fTd, info);
+                        } else {
+                            pTd.innerHTML = '<span style="color:#999; font-size:0.85em;">\u2014</span>';
+                        }
+                    });
+                })(ident, tdFuel, tdFBO);
             }
 
             row.appendChild(tdFuel);
             row.appendChild(tdFBO);
-            candidateIdx++;
+            idx++;
         }
     }
 
     function fillFuelCells(tdFuel, tdFBO, info) {
         if (info.isCAA) {
-            // CAA airport — show CAA price with badge, retail crossed out, savings
-            const savings = (info.retailPrice - info.caaPrice).toFixed(2);
+            var savings = (info.retailPrice - info.caaPrice).toFixed(2);
             tdFuel.innerHTML =
-                `<span style="background:#1a7f37; color:#fff; font-size:0.7em; padding:1px 4px; border-radius:3px; vertical-align:middle; margin-right:4px;">CAA</span>` +
-                `<strong style="color:#1a7f37;">$${info.caaPrice.toFixed(2)}</strong>` +
-                `<br><span style="color:#888; font-size:0.8em; text-decoration:line-through;">$${info.retailPrice.toFixed(2)}</span>` +
-                ` <span style="color:#1a7f37; font-size:0.8em;">save $${savings}</span>`;
+                '<span style="background:#1a7f37; color:#fff; font-size:0.7em; padding:1px 4px; border-radius:3px; vertical-align:middle; margin-right:4px;">CAA</span>' +
+                '<strong style="color:#1a7f37;">$' + info.caaPrice.toFixed(2) + '</strong>' +
+                '<br><span style="color:#888; font-size:0.8em; text-decoration:line-through;">$' + info.retailPrice.toFixed(2) + '</span>' +
+                ' <span style="color:#1a7f37; font-size:0.8em;">save $' + savings + '</span>';
         } else {
-            // Non-CAA — show retail price
-            tdFuel.innerHTML = `<strong>$${info.price.toFixed(2)}</strong>`;
+            tdFuel.innerHTML = '<strong>$' + info.price.toFixed(2) + '</strong>';
         }
         tdFBO.textContent = info.fbo || '';
-        tdFBO.title = info.fbo || ''; // Tooltip for truncated names
+        tdFBO.title = info.fbo || '';
     }
 
     function updatePricingCells() {
-        // Called when CAA data arrives after table was already enhanced
-        for (const candidate of lastCandidates) {
-            const ident = candidate.airport.ident;
-            const tdFuel = document.getElementById(`fuel-price-${ident}`);
-            const tdFBO = document.getElementById(`fuel-fbo-${ident}`);
+        for (var i = 0; i < lastCandidates.length; i++) {
+            var ident = lastCandidates[i].airport.ident;
+            var tdFuel = document.getElementById('fuel-price-' + ident);
+            var tdFBO = document.getElementById('fuel-fbo-' + ident);
             if (!tdFuel || !tdFBO) continue;
-
-            const cached = getCachedFuel(ident);
-            if (cached) {
-                fillFuelCells(tdFuel, tdFBO, cached);
-            }
+            var cached = getCachedFuel(ident);
+            if (cached) fillFuelCells(tdFuel, tdFBO, cached);
         }
     }
 
@@ -379,13 +388,11 @@ const FuelStops = (() => {
     // PUBLIC API
     // =========================================================
     return {
-        findCandidates,
-        getCachedFuel,
-        fetchAirNavFuel,
-        enhanceFuelTable,
-        init() {
-            // CAA data already auto-fetches on load
-            // This is here for compatibility if app.js calls FuelStops.init()
+        findCandidates: findCandidates,
+        getCachedFuel: getCachedFuel,
+        fetchAirNavFuel: fetchAirNavFuel,
+        enhanceFuelTable: enhanceFuelTable,
+        init: function() {
             console.log('[FuelStops] init called — CAA auto-fetch already in progress');
         },
         get caaLoaded() { return caaLoaded; },
