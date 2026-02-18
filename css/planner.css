@@ -110,16 +110,6 @@ body {
     font-size: 0.9rem;
 }
 
-/* Generic input label (used by departure section) */
-.input-label {
-    display: block;
-    font-size: 0.75rem;
-    color: var(--text-label);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 6px;
-}
-
 /* Airport info display below input */
 .airport-info {
     font-size: 0.8rem;
@@ -169,143 +159,6 @@ body {
     font-size: 0.75rem;
 }
 
-/* ── Departure Day & Time Selector ── */
-.departure-time-section {
-    margin: 16px 0 16px 0;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-}
-
-.day-selector {
-    display: flex;
-    gap: 6px;
-    margin-bottom: 10px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    padding: 2px 0;
-}
-
-.day-btn {
-    flex-shrink: 0;
-    padding: 8px 14px;
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    background: var(--bg-input);
-    color: var(--text-secondary);
-    font-family: var(--font-sans);
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    -webkit-tap-highlight-color: transparent;
-    user-select: none;
-    min-width: 52px;
-    text-align: center;
-}
-
-.day-btn:hover {
-    border-color: var(--text-secondary);
-    color: var(--text-primary);
-}
-
-.day-btn.active {
-    background: var(--accent-blue);
-    border-color: var(--accent-blue);
-    color: #fff;
-    font-weight: 600;
-}
-
-.time-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-}
-
-.time-input {
-    width: 90px;
-    padding: 10px 12px;
-    font-size: 1.2rem;
-    font-family: var(--font-mono);
-    font-weight: 600;
-    text-align: center;
-    letter-spacing: 3px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    -webkit-appearance: none;
-    appearance: none;
-    outline: none;
-    transition: border-color 0.2s;
-}
-
-.time-input:focus {
-    border-color: var(--border-focus);
-}
-
-.time-input::placeholder {
-    color: var(--text-label);
-    letter-spacing: 3px;
-}
-
-.time-label {
-    font-size: 0.8rem;
-    color: var(--text-label);
-    text-transform: uppercase;
-    min-width: 32px;
-}
-
-.time-separator {
-    color: var(--text-label);
-    font-size: 1rem;
-}
-
-.zulu-display {
-    font-size: 1.2rem;
-    font-family: var(--font-mono);
-    font-weight: 600;
-    color: var(--accent-blue);
-    letter-spacing: 2px;
-}
-
-.forecast-indicator {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-top: 4px;
-    min-height: 18px;
-}
-
-.forecast-indicator .forecast-tag {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 0.65rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.forecast-tag.fc-06 {
-    background: rgba(76, 175, 80, 0.2);
-    color: var(--accent-green);
-}
-
-.forecast-tag.fc-12 {
-    background: rgba(255, 152, 0, 0.2);
-    color: var(--accent-orange);
-}
-
-.forecast-tag.fc-24 {
-    background: rgba(244, 67, 54, 0.2);
-    color: var(--accent-red);
-}
-
-.forecast-tag.fc-past {
-    background: rgba(255, 214, 10, 0.2);
-    color: #ffd60a;
-}
-
 /* Calculate button */
 .btn-calculate {
     width: 100%;
@@ -334,7 +187,7 @@ body {
 
 .route-summary {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 8px;
     margin-bottom: 16px;
 }
@@ -482,11 +335,138 @@ body {
         grid-template-columns: 1fr 1fr;
         gap: 12px;
     }
+    .route-summary {
+        grid-template-columns: repeat(4, 1fr);
+    }
 }
 
-/* Phone portrait — stack route summary 2x2 */
-@media (max-width: 480px) {
-    .route-summary {
-        grid-template-columns: repeat(2, 1fr);
-    }
+/* ============================================================
+   WIND STATUS & FORECAST STYLES
+   ============================================================ */
+
+/* --- Wind Status Bar (top-of-card wind fetch indicator) --- */
+.wind-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin: -16px -16px 12px -16px;
+    border-radius: 10px 10px 0 0;
+    font-size: 0.78rem;
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-input);
+}
+.wind-status-bar .status-dot {
+    flex-shrink: 0;
+}
+.wind-status-bar.wind-ok {
+    border-bottom-color: rgba(76, 175, 80, 0.25);
+}
+.wind-status-bar.wind-warn {
+    border-bottom-color: rgba(255, 152, 0, 0.25);
+}
+
+/* --- Wind OK / Warn text (reusable utility classes) --- */
+.wind-ok {
+    color: var(--accent-green);
+}
+.wind-warn {
+    color: var(--accent-orange);
+}
+
+/* --- Ground Speed: Headwind / Tailwind coloring in table --- */
+.gs-tailwind {
+    color: var(--accent-green);
+}
+.gs-headwind {
+    color: var(--accent-orange);
+}
+
+/* Wind delta annotation (e.g., "+12" or "−18" next to GS) */
+.gs-delta {
+    font-size: 0.7rem;
+    font-weight: 400;
+    margin-left: 3px;
+    opacity: 0.8;
+}
+.gs-tailwind .gs-delta { color: var(--accent-green); }
+.gs-headwind .gs-delta { color: var(--accent-orange); }
+
+/* --- Wind Footer (bottom status bar wind section) --- */
+.wind-status-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.wind-footer-ok {
+    color: var(--accent-green);
+}
+.wind-footer-ok .status-dot { background: var(--accent-green); }
+
+.wind-footer-warn {
+    color: var(--accent-orange);
+}
+.wind-footer-warn .status-dot { background: var(--accent-orange); }
+
+/* --- Phase Wind Info (wind callout in phase breakdown rows) --- */
+.phase-wind-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    padding: 4px 0;
+    margin-top: 2px;
+}
+.phase-wind-info .wind-arrow {
+    font-size: 0.85rem;
+    line-height: 1;
+}
+.phase-wind-info .wind-value {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+}
+.phase-wind-info.tailwind .wind-value { color: var(--accent-green); }
+.phase-wind-info.headwind .wind-value { color: var(--accent-orange); }
+
+/* --- Forecast Period Indicator --- */
+.forecast-ok {
+    color: var(--accent-green);
+}
+.forecast-warn {
+    color: var(--accent-orange);
+    font-weight: 600;
+}
+
+/* Forecast badge pill (for displaying 06hr / 12hr / 24hr period) */
+.forecast-badge {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.forecast-badge.forecast-ok {
+    background: rgba(76, 175, 80, 0.15);
+    color: var(--accent-green);
+}
+.forecast-badge.forecast-warn {
+    background: rgba(255, 152, 0, 0.15);
+    color: var(--accent-orange);
+}
+
+/* --- Wind loading state (while fetching NOAA data) --- */
+.wind-loading {
+    color: var(--text-label);
+    font-style: italic;
+}
+
+/* --- No-wind fallback text --- */
+.wind-none {
+    color: var(--text-label);
+    font-size: 0.75rem;
+    font-style: italic;
 }
