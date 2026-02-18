@@ -1,15 +1,39 @@
 // ============================================================
 // APP MODULE — TBM850 Apple Flight Planner
 // UI wiring, state management, event handlers
-// Requires: airports.js, performance.js, route.js, flight-calc.js,
-//           fuel-stops.js
+// Requires: airports.js, performance.js, route.js,
+//           flight-calc.js, gfs-winds.js, fuel-stops.js
 // ============================================================
 
 var appState = {
     departure: null,
     destination: null,
-    lastResults: null
+    lastResults: null,
+    gfsWindData: null
 };
+
+// ============================================================
+// WIND UTILITY FUNCTIONS
+// Called by gfs-winds.js — must be global
+// ============================================================
+
+// Break wind into headwind/crosswind components relative to course
+function windComponents(windDir, windSpeed, courseDeg) {
+    var angle = (windDir - courseDeg) * DEG2RAD;
+    return {
+        headwind:  Math.round(windSpeed * Math.cos(angle)),
+        crosswind: Math.round(windSpeed * Math.sin(angle))
+    };
+}
+
+// Wind triangle: compute ground speed given TAS, wind, and course
+function windTriangleGS(tas, windDir, windSpeed, courseDeg) {
+    var windAngle = (windDir - courseDeg) * DEG2RAD;
+    var headwind = windSpeed * Math.cos(windAngle);
+    var crosswind = windSpeed * Math.sin(windAngle);
+    var gs = Math.sqrt(Math.max(0, tas * tas - crosswind * crosswind)) - headwind;
+    return Math.max(Math.round(gs), 50);
+}
 
 // ============================================================
 // INITIALIZATION
@@ -17,7 +41,6 @@ var appState = {
 function initApp() {
     updateStatus('loading', 'Loading airports...');
 
-    // Try loading CSV from relative path first, then GitHub raw
     var csvUrls = [
         'us-airports.csv',
         'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/apple/us-airports.csv'
@@ -38,8 +61,6 @@ function initApp() {
             checkReady();
         });
         document.getElementById('btn-calc').addEventListener('click', runCalculation);
-
-        // Focus departure field
         document.getElementById('dep-input').focus();
     });
 }
@@ -96,7 +117,6 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         dropdown.classList.add('active');
     });
 
-    // Keyboard navigation
     input.addEventListener('keydown', function(e) {
         if (!dropdown.classList.contains('active')) return;
         var items = dropdown.querySelectorAll('.autocomplete-item');
@@ -120,14 +140,12 @@ function setupAutocomplete(inputId, dropdownId, infoId, onSelect) {
         }
     });
 
-    // Close on outside tap
     document.addEventListener('click', function(e) {
         if (!input.contains(e.target) && !dropdown.contains(e.target)) {
             dropdown.classList.remove('active');
         }
     });
 
-    // Also try exact match on blur (user typed full code and tabbed away)
     input.addEventListener('blur', function() {
         setTimeout(function() {
             if (appState.departure && inputId === 'dep-input') return;
@@ -178,20 +196,84 @@ function escHTML(s) {
 }
 
 // ============================================================
-// CALCULATION
+// CALCULATION — async for GFS wind fetch
 // ============================================================
 function checkReady() {
     var btn = document.getElementById('btn-calc');
     btn.disabled = !(appState.departure && appState.destination);
 }
 
-function runCalculation() {
+async function runCalculation() {
     if (!appState.departure || !appState.destination) return;
 
     var dep = appState.departure;
     var dest = appState.destination;
-    var results = calculateAltitudeOptions(dep, dest);
+    var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
+
+    // Show loading state
+    updateStatus('loading', 'Fetching GFS winds…');
+    var btn = document.getElementById('btn-calc');
+    btn.disabled = true;
+    btn.textContent = 'Fetching Winds…';
+
+    // Fetch GFS winds
+    var gfsData = null;
+    try {
+        gfsData = await fetchGFSWinds(
+            { icao: dep.ident, lat: dep.lat, lon: dep.lon },
+            { icao: dest.ident, lat: dest.lat, lon: dest.lon },
+            null
+        );
+    } catch (e) {
+        console.error('GFS wind fetch error:', e);
+    }
+    appState.gfsWindData = gfsData;
+
+    // Calculate altitude options with wind correction
+    var altitudes = getTop3Altitudes(trueCourse);
+    var options = [];
+
+    for (var i = 0; i < altitudes.length; i++) {
+        var alt = altitudes[i];
+        var perf = getPerformanceAtAltitude(alt);
+        var tas = perf.cruiseTAS;
+        var gs = tas;
+        var windSummary = null;
+
+        if (gfsData) {
+            gs = calculateGFSGroundSpeed(gfsData, alt, trueCourse, tas);
+            windSummary = getGFSWindSummary(gfsData, alt, trueCourse, tas);
+        }
+
+        var plan = calculateFlight(dep, dest, alt, gs);
+        plan.windSummary = windSummary;
+        options.push(plan);
+    }
+
+    // Sort by shortest time (best wind-corrected option first)
+    options.sort(function(a, b) { return a.totals.timeMin - b.totals.timeMin; });
+
+    var results = {
+        trueCourse: Math.round(trueCourse),
+        direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
+        options: options
+    };
+
     appState.lastResults = results;
+
+    // Update status
+    if (gfsData) {
+        var windSourceEl = document.getElementById('wind-source');
+        if (windSourceEl) {
+            windSourceEl.textContent = 'GFS ' + gfsData.cycle + ' · ' + gfsData.pointCount + ' pts';
+        }
+        updateStatus('ok', airportDB.length + ' airports · GFS winds active');
+    } else {
+        updateStatus('ok', airportDB.length + ' airports · No wind data');
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Calculate Flight Plan';
 
     displayResults(results, dep, dest);
 }
@@ -205,7 +287,6 @@ function displayResults(results, dep, dest) {
 
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
 
-    // Route summary
     document.getElementById('sum-route').textContent = dep.ident + ' → ' + dest.ident;
     document.getElementById('sum-dist').textContent = Math.round(totalDist);
     document.getElementById('sum-course').textContent = results.trueCourse + '°';
@@ -217,27 +298,18 @@ function displayResults(results, dep, dest) {
 
     if (needsFuelStop(results)) {
         fuelStopEl.innerHTML = '<span class="fuel-stop-badge">⛽ Fuel Stop Required — Searching CAA Airports…</span>';
-
-        // Show results container with loading state
         fuelResultsEl.style.display = 'block';
         document.getElementById('fuel-stop-cards').innerHTML =
             '<div style="text-align:center;color:var(--text-label);padding:20px;">' +
             '⏳ Loading CAA fuel prices and finding best stops…</div>';
 
-        // Find best altitude option (shortest time)
-        var bestIdx = 0;
-        for (var b = 1; b < results.options.length; b++) {
-            if (results.options[b].totals.timeMin < results.options[bestIdx].totals.timeMin) bestIdx = b;
-        }
-        var bestOption = results.options[bestIdx];
-
-        // Launch fuel stop search
+        var bestOption = results.options[0];
         FuelStops.planFuelStops(dep, dest, bestOption)
-            .then(function (fsResult) {
+            .then(function(fsResult) {
                 fuelStopEl.innerHTML = '<span class="fuel-stop-badge">⛽ Fuel Stop Required</span>';
                 renderFuelStopCards(fsResult);
             })
-            .catch(function (err) {
+            .catch(function(err) {
                 console.error('Fuel stop error:', err);
                 fuelStopEl.innerHTML = '<span class="fuel-stop-badge">⛽ Fuel Stop Required</span>';
                 document.getElementById('fuel-stop-cards').innerHTML =
@@ -252,33 +324,35 @@ function displayResults(results, dep, dest) {
     var tbody = document.getElementById('alt-table-body');
     tbody.innerHTML = '';
 
-    var bestIdx = 0;
-    for (var i = 1; i < results.options.length; i++) {
-        if (results.options[i].totals.timeMin < results.options[bestIdx].totals.timeMin) {
-            bestIdx = i;
-        }
-    }
-
     for (var i = 0; i < results.options.length; i++) {
         var plan = results.options[i];
         var tr = document.createElement('tr');
-        if (i === bestIdx) tr.className = 'best';
+        if (i === 0) tr.className = 'best';
+
+        var gsText = Math.round(plan.cruise.groundSpeed);
+        var windNote = '';
+        if (plan.windSummary && plan.windSummary.available) {
+            var wc = plan.windSummary.windComponent;
+            if (wc > 0) {
+                windNote = ' <span style="color:#ff9944;font-size:0.75em;">(' + wc + 'kt HW)</span>';
+            } else if (wc < 0) {
+                windNote = ' <span style="color:#44cc88;font-size:0.75em;">(' + Math.abs(wc) + 'kt TW)</span>';
+            }
+        }
+
         tr.innerHTML =
             '<td>FL' + (plan.cruiseAlt / 100) + '</td>' +
             '<td>' + plan.totals.timeHrs + '</td>' +
             '<td>' + plan.totals.fuelGal + '</td>' +
             '<td>' + plan.cruise.tas + '</td>' +
-            '<td>' + Math.round(plan.cruise.groundSpeed) + '</td>';
+            '<td>' + gsText + windNote + '</td>';
         tr.addEventListener('click', (function(p) {
             return function() { displayPhaseDetail(p); };
         })(plan));
         tbody.appendChild(tr);
     }
 
-    // Auto-show phase detail for best option
-    displayPhaseDetail(results.options[bestIdx]);
-
-    // Scroll to results
+    displayPhaseDetail(results.options[0]);
     section.scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -289,9 +363,7 @@ function renderFuelStopCards(result) {
     var container = document.getElementById('fuel-stop-cards');
 
     if (!result.success) {
-        container.innerHTML =
-            '<div style="color:#ff9944;padding:12px;">' +
-            '⚠ ' + result.error + '</div>';
+        container.innerHTML = '<div style="color:#ff9944;padding:12px;">⚠ ' + result.error + '</div>';
         return;
     }
 
@@ -302,7 +374,6 @@ function renderFuelStopCards(result) {
     for (var idx = 0; idx < result.options.length; idx++) {
         var opt = result.options[idx];
 
-        // Tag colors
         var tagBg, tagColor;
         if (opt.tag.indexOf('Cheapest') >= 0 && opt.tag.indexOf('Fastest') >= 0) {
             tagBg = 'rgba(255,204,68,0.15)'; tagColor = '#ffcc44';
@@ -314,20 +385,16 @@ function renderFuelStopCards(result) {
             tagBg = 'rgba(160,160,200,0.12)'; tagColor = '#aab';
         }
 
-        // Card wrapper
         html += '<div style="background:var(--card-bg);border:1px solid ' +
                 (idx === 0 ? 'var(--accent)' : 'var(--border)') +
                 ';border-radius:10px;padding:14px;margin-bottom:10px;">';
 
-        // Header: tag + option number
         html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
         html += '<span style="background:' + tagBg + ';color:' + tagColor +
-                ';padding:3px 12px;border-radius:12px;font-size:0.8em;font-weight:600;">' +
-                opt.tag + '</span>';
+                ';padding:3px 12px;border-radius:12px;font-size:0.8em;font-weight:600;">' + opt.tag + '</span>';
         html += '<span style="color:var(--text-label);font-size:0.8em;">Option ' + (idx + 1) + '</span>';
         html += '</div>';
 
-        // Stop info — single stop
         if (opt.numStops === 1) {
             var s = opt.stop;
             html += '<div style="margin-bottom:4px;">';
@@ -335,34 +402,29 @@ function renderFuelStopCards(result) {
             html += ' <span style="color:var(--text-label);font-size:0.85em;">' + s.city + ', ' + s.state + '</span>';
             html += '</div>';
             html += '<div style="color:var(--accent);font-size:0.85em;margin-bottom:8px;">🏢 ' + s.fbo + '</div>';
-
-            // CAA badge + pricing
             html += '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">';
             html += '<span style="background:rgba(68,204,136,0.15);color:#44cc88;padding:2px 10px;border-radius:6px;font-size:0.78em;font-weight:600;">✓ CAA Member</span>';
             html += '<span style="color:var(--text-primary);font-weight:700;">$' + s.caaPrice.toFixed(2) + '/gal</span>';
             html += '<span style="color:var(--text-label);font-size:0.85em;text-decoration:line-through;">$' + s.retailPrice.toFixed(2) + ' retail</span>';
-            var savings = s.retailPrice - s.caaPrice;
-            html += '<span style="color:#44cc88;font-size:0.8em;">Save $' + savings.toFixed(2) + '/gal</span>';
+            html += '<span style="color:#44cc88;font-size:0.8em;">Save $' + (s.retailPrice - s.caaPrice).toFixed(2) + '/gal</span>';
             html += '</div>';
         }
 
-        // Stop info — two stops
         if (opt.numStops === 2) {
             for (var si = 0; si < opt.stops.length; si++) {
-                var s = opt.stops[si];
+                var s2 = opt.stops[si];
                 html += '<div style="' + (si > 0 ? 'margin-top:8px;padding-top:8px;border-top:1px solid var(--border);' : '') + 'margin-bottom:4px;">';
                 html += '<span style="color:var(--text-label);font-size:0.75em;">Stop ' + (si + 1) + ':</span> ';
-                html += '<span style="color:var(--text-primary);font-weight:700;">' + s.icao + '</span>';
-                html += ' <span style="color:var(--text-label);font-size:0.85em;">' + s.city + ', ' + s.state + '</span>';
+                html += '<span style="color:var(--text-primary);font-weight:700;">' + s2.icao + '</span>';
+                html += ' <span style="color:var(--text-label);font-size:0.85em;">' + s2.city + ', ' + s2.state + '</span>';
                 html += '</div>';
-                html += '<div style="color:var(--accent);font-size:0.85em;">🏢 ' + s.fbo +
-                         ' · <span style="color:#44cc88;">$' + s.caaPrice.toFixed(2) + '/gal</span>' +
-                         ' <span style="color:var(--text-label);text-decoration:line-through;font-size:0.85em;">$' + s.retailPrice.toFixed(2) + '</span></div>';
+                html += '<div style="color:var(--accent);font-size:0.85em;">🏢 ' + s2.fbo +
+                         ' · <span style="color:#44cc88;">$' + s2.caaPrice.toFixed(2) + '/gal</span>' +
+                         ' <span style="color:var(--text-label);text-decoration:line-through;font-size:0.85em;">$' + s2.retailPrice.toFixed(2) + '</span></div>';
             }
             html += '<div style="margin-bottom:10px;"></div>';
         }
 
-        // Leg breakdown
         html += '<div style="border-top:1px solid var(--border);padding-top:8px;">';
         for (var li = 0; li < opt.legs.length; li++) {
             var leg = opt.legs[li];
@@ -371,8 +433,6 @@ function renderFuelStopCards(result) {
             html += '<span>' + leg.data.distNM + ' nm · ' + leg.data.timeHrs + ' · ' + leg.data.fuelGal + ' gal</span>';
             html += '</div>';
         }
-
-        // Ground time
         var groundMin = opt.numStops * FuelStops.GROUND_TIME_MIN;
         html += '<div style="display:flex;justify-content:space-between;color:#ffcc44;font-size:0.85em;padding:3px 0;">';
         html += '<span>⏱ Ground time (' + opt.numStops + ' stop' + (opt.numStops > 1 ? 's' : '') + ')</span>';
@@ -380,13 +440,12 @@ function renderFuelStopCards(result) {
         html += '</div>';
         html += '</div>';
 
-        // Totals bar
         html += '<div style="display:flex;justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">';
         html += '<span style="color:var(--accent);font-weight:700;">Total: ' + opt.totalTimeHrs + '</span>';
         html += '<span style="color:#44cc88;font-weight:700;">Fuel: ' + opt.fuelToBuyGal + ' gal · $' + opt.fuelCost.toFixed(2) + '</span>';
         html += '</div>';
 
-        html += '</div>';  // close card
+        html += '</div>';
     }
 
     container.innerHTML = html;
@@ -397,8 +456,19 @@ function renderFuelStopCards(result) {
 // ============================================================
 function displayPhaseDetail(plan) {
     var el = document.getElementById('phase-detail');
+
+    var windInfo = '';
+    if (plan.windSummary && plan.windSummary.available) {
+        var ws = plan.windSummary;
+        var windColor = ws.windComponent > 0 ? '#ff9944' : '#44cc88';
+        windInfo = '<div style="color:' + windColor + ';font-size:0.85em;margin-bottom:8px;">' +
+                   '💨 ' + ws.description + ' · GS ' + ws.gs + 'kt (TAS ' + plan.cruise.tas + ')' +
+                   '</div>';
+    }
+
     el.innerHTML =
         '<div class="card-title">FL' + (plan.cruiseAlt / 100) + ' Phase Breakdown</div>' +
+        windInfo +
         '<div class="phase-row header">' +
             '<div>Phase</div><div class="phase-value">Time</div>' +
             '<div class="phase-value">Fuel</div><div class="phase-value">Dist</div>' +
