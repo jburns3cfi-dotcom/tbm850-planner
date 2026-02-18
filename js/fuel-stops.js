@@ -13,8 +13,9 @@ const FuelStops = (() => {
     let fuelCache = {};        // Per-airport fuel cache {KXXX: {fbo, price, caaPrice, isCAA}}
 
     // ----- Constants -----
-    const CAA_URL = 'https://caa-fuel.jburns3cfi.workers.dev';
-    const AIRNAV_URL = 'https://airnav-grab.jburns3cfi.workers.dev';
+    const PROXY = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
+    const CAA_URL = PROXY + encodeURIComponent('https://caa-fuel.jburns3cfi.workers.dev');
+    const AIRNAV_BASE = 'https://airnav-grab.jburns3cfi.workers.dev';
     const CORRIDOR_NM = 30;
     const MIN_FROM_DEP_NM = 200;
     const DESCENT_BUFFER_NM = 60;   // Exclude airports this close to destination
@@ -92,36 +93,67 @@ const FuelStops = (() => {
             return [];
         }
 
-        // Get dep/dest coordinates from airportDB
-        const depApt = airportDB.find(a => a.ident === dep);
-        const destApt = airportDB.find(a => a.ident === dest);
+        // Resolve dep/dest to ICAO codes — handle string, object, or display string
+        const resolveIdent = (val) => {
+            if (!val) return null;
+            if (typeof val === 'object' && val.ident) return val.ident;
+            if (typeof val === 'string') {
+                // Could be "KSTE" or "KSTE - Stevens Point..." — grab first 4-char token
+                const match = val.match(/\b([KP][A-Z0-9]{3})\b/);
+                return match ? match[1] : val.trim().substring(0, 4).toUpperCase();
+            }
+            return String(val);
+        };
+
+        const depIdent = resolveIdent(dep);
+        const destIdent = resolveIdent(dest);
+
+        console.log(`[FuelStops] Searching candidates: ${depIdent} → ${destIdent}, totalDist=${totalDist}`);
+
+        // Find dep/dest in airportDB — try multiple field names
+        const findAirport = (ident) => {
+            return airportDB.find(a =>
+                a.ident === ident ||
+                a.icao === ident ||
+                a.gps_code === ident ||
+                a.id === ident
+            );
+        };
+
+        const depApt = findAirport(depIdent);
+        const destApt = findAirport(destIdent);
+
         if (!depApt || !destApt) {
-            console.warn('[FuelStops] Could not find dep or dest in airportDB');
+            console.warn(`[FuelStops] Could not find airports: dep=${depIdent} (${!!depApt}), dest=${destIdent} (${!!destApt})`);
+            // Log first airport's keys for debugging
+            if (airportDB.length > 0) {
+                console.log('[FuelStops] Airport field names:', Object.keys(airportDB[0]).join(', '));
+            }
             return [];
         }
 
-        const depLat = parseFloat(depApt.latitude_deg);
-        const depLon = parseFloat(depApt.longitude_deg);
-        const destLat = parseFloat(destApt.latitude_deg);
-        const destLon = parseFloat(destApt.longitude_deg);
+        const depLat = parseFloat(depApt.latitude_deg || depApt.lat || depApt.latitude);
+        const depLon = parseFloat(depApt.longitude_deg || depApt.lon || depApt.longitude);
+        const destLat = parseFloat(destApt.latitude_deg || destApt.lat || destApt.latitude);
+        const destLon = parseFloat(destApt.longitude_deg || destApt.lon || destApt.longitude);
 
         // Filter candidates
         const inCorridor = [];
         for (const apt of airportDB) {
             // Skip departure, destination
-            if (apt.ident === dep || apt.ident === dest) continue;
+            const aptIdent = apt.ident || apt.icao || apt.gps_code || apt.id || '';
+            if (aptIdent === depIdent || aptIdent === destIdent) continue;
 
             // Medium and large airports only
             const t = (apt.type || '').toLowerCase();
             if (t.indexOf('medium') === -1 && t.indexOf('large') === -1) continue;
 
             // Must be in the US (ident starts with K and is 4 chars, or starts with P for Alaska/Hawaii)
-            const id = apt.ident || '';
-            if (id.length !== 4) continue;
-            if (id[0] !== 'K' && id[0] !== 'P') continue;
+            if (aptIdent.length !== 4) continue;
+            if (aptIdent[0] !== 'K' && aptIdent[0] !== 'P') continue;
 
-            const aptLat = parseFloat(apt.latitude_deg);
-            const aptLon = parseFloat(apt.longitude_deg);
+            const aptLat = parseFloat(apt.latitude_deg || apt.lat || apt.latitude);
+            const aptLon = parseFloat(apt.longitude_deg || apt.lon || apt.longitude);
             if (isNaN(aptLat) || isNaN(aptLon)) continue;
 
             const distFromDep = haversineNM(depLat, depLon, aptLat, aptLon);
@@ -141,10 +173,10 @@ const FuelStops = (() => {
 
             inCorridor.push({
                 airport: {
-                    ident: apt.ident,
+                    ident: aptIdent,
                     name: apt.name,
                     municipality: apt.municipality || '',
-                    region: (apt.iso_region || '').replace('US-', '')
+                    region: (apt.iso_region || apt.region || '').replace('US-', '')
                 },
                 distFromDep: Math.round(distFromDep * 10) / 10,
                 distFromDest: Math.round(distFromDest * 10) / 10,
@@ -182,7 +214,7 @@ const FuelStops = (() => {
     async function fetchAirNavFuel(ident) {
         if (fuelCache[ident]) return fuelCache[ident];
         try {
-            const resp = await fetch(`${AIRNAV_URL}?id=${ident}`);
+            const resp = await fetch(`${PROXY}${encodeURIComponent(AIRNAV_BASE + '?id=' + ident)}`);
             const data = await resp.json();
             if (data.jetA && data.jetA.price) {
                 const info = {
