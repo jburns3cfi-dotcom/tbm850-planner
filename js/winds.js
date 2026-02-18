@@ -11,7 +11,7 @@ var WINDS_PROXY_URL = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
 var WIND_ALTITUDES = [3000, 6000, 9000, 12000, 18000, 24000, 30000, 34000, 39000];
 
 // Maximum distance (nm) from route centerline to use a wind station
-var MAX_STATION_DISTANCE_NM = 150;
+var MAX_STATION_DISTANCE_NM = 100;
 
 // ============================================================
 // NOAA WIND REPORTING STATIONS — CONUS
@@ -185,13 +185,14 @@ async function fetchRouteWinds(dep, dest, forecastHr) {
 
 
 // ============================================================
-// GROUND SPEED — Segment-based time-weighted GS calculation
+// GROUND SPEED — Segment-based, cross-track weighted
 // ============================================================
-// Divides route into segments owned by each station (midpoint to
-// midpoint between adjacent stations). Computes GS per segment,
-// time per segment, then effective GS = totalDist / totalTime.
-// This naturally weights headwind segments more (they take more
-// time) and tailwind segments less — matching real flight behavior.
+// Each station owns a segment of the route. Segment boundaries
+// are weighted midpoints: stations closer to the route centerline
+// get larger segments (more influence). Then GS per segment is
+// computed from that station's wind, and effective GS = totalDist
+// / totalTime. This naturally time-weights headwinds AND gives
+// more influence to stations with better route-line accuracy.
 // ============================================================
 function calculateGroundSpeed(routeWindData, cruiseAlt, trueCourse, tas) {
     if (!routeWindData || !routeWindData.stationWinds) return tas;
@@ -200,62 +201,58 @@ function calculateGroundSpeed(routeWindData, cruiseAlt, trueCourse, tas) {
     var totalDist = routeWindData.totalDist;
     if (!stations || stations.length === 0 || !totalDist) return tas;
 
-    // Build segments: each station owns route from midpoint-to-prev to midpoint-to-next
-    var segments = [];
+    // Filter to stations that have wind data at this altitude
+    var validStations = [];
     for (var i = 0; i < stations.length; i++) {
-        var stn = stations[i];
-        var wind = interpolateWind(routeWindData.stationWinds[stn.id], cruiseAlt);
-        if (!wind) continue;
-
-        // Segment start: midpoint between this station and previous (or route start)
-        var segStart;
-        if (i === 0) {
-            segStart = 0;
-        } else {
-            segStart = (stations[i - 1].distFromDep + stn.distFromDep) / 2;
+        var wind = interpolateWind(routeWindData.stationWinds[stations[i].id], cruiseAlt);
+        if (wind) {
+            validStations.push({
+                id: stations[i].id,
+                distFromDep: stations[i].distFromDep,
+                crossTrack: stations[i].crossTrack || 0,
+                wind: wind
+            });
         }
-
-        // Segment end: midpoint between this station and next (or route end)
-        var segEnd;
-        if (i === stations.length - 1) {
-            segEnd = totalDist;
-        } else {
-            segEnd = (stn.distFromDep + stations[i + 1].distFromDep) / 2;
-        }
-
-        var segDist = segEnd - segStart;
-        if (segDist <= 0) continue;
-
-        var comp = windComponents(wind.direction, wind.speed, trueCourse);
-        var segGS = Math.max(50, tas - comp.headwind);
-
-        segments.push({
-            id: stn.id,
-            dist: segDist,
-            gs: segGS,
-            headwind: comp.headwind
-        });
     }
+    if (validStations.length === 0) return tas;
 
-    if (segments.length === 0) return tas;
+    // Build segment boundaries using cross-track weighted midpoints
+    // Close-to-route stations get larger segments (boundary pushed toward far station)
+    var boundaries = [0]; // start of route
+    for (var i = 0; i < validStations.length - 1; i++) {
+        var a = validStations[i];
+        var b = validStations[i + 1];
+        // Inverse cross-track weight: closer = bigger number = more territory
+        var wA = 1 / (a.crossTrack + 5);
+        var wB = 1 / (b.crossTrack + 5);
+        // Push boundary toward the FAR station (giving close station more territory)
+        var midpoint = a.distFromDep + (b.distFromDep - a.distFromDep) * (wA / (wA + wB));
+        boundaries.push(midpoint);
+    }
+    boundaries.push(totalDist); // end of route
 
-    // Total time = sum of (segment distance / segment GS)
+    // Compute time per segment
     var totalTime = 0;
     var coveredDist = 0;
-    for (var j = 0; j < segments.length; j++) {
-        totalTime += segments[j].dist / segments[j].gs;
-        coveredDist += segments[j].dist;
+    for (var j = 0; j < validStations.length; j++) {
+        var segDist = boundaries[j + 1] - boundaries[j];
+        if (segDist <= 0) continue;
+
+        var comp = windComponents(validStations[j].wind.direction, validStations[j].wind.speed, trueCourse);
+        var segGS = Math.max(50, tas - comp.headwind);
+
+        totalTime += segDist / segGS;
+        coveredDist += segDist;
     }
 
-    // If stations don't cover the full route, fill remainder with TAS
+    // Fill uncovered distance with TAS
     if (coveredDist < totalDist) {
         totalTime += (totalDist - coveredDist) / tas;
     }
 
-    // Effective GS = total distance / total time
     var effectiveGS = Math.round(totalDist / totalTime);
 
-    console.log('[WIND] Segment GS calc: ' + segments.length + ' segments, effective GS=' +
+    console.log('[WIND] Segment GS calc: ' + validStations.length + ' segments, effective GS=' +
         effectiveGS + 'kt (TAS=' + tas + ')');
 
     return effectiveGS;
@@ -568,7 +565,7 @@ function windComponents(windDir, windSpd, courseTrue) {
 
 
 // ============================================================
-// WIND SUMMARY — Segment-based wind info for display
+// WIND SUMMARY — Segment-based, cross-track weighted
 // ============================================================
 function getWindSummary(routeWindData, cruiseAlt, trueCourse, tas) {
     if (!routeWindData || !routeWindData.stationWinds) {
@@ -581,43 +578,56 @@ function getWindSummary(routeWindData, cruiseAlt, trueCourse, tas) {
         return { available: false, gs: tas, windComponent: 0, description: 'No wind data' };
     }
 
-    // Build segments same as calculateGroundSpeed
+    // Filter to stations with wind data
+    var validStations = [];
+    for (var i = 0; i < stations.length; i++) {
+        var wind = interpolateWind(routeWindData.stationWinds[stations[i].id], cruiseAlt);
+        if (wind) {
+            validStations.push({
+                id: stations[i].id,
+                distFromDep: stations[i].distFromDep,
+                crossTrack: stations[i].crossTrack || 0,
+                wind: wind
+            });
+        }
+    }
+    if (validStations.length === 0) {
+        return { available: false, gs: tas, windComponent: 0, description: 'No wind data' };
+    }
+
+    // Cross-track weighted segment boundaries (same as calculateGroundSpeed)
+    var boundaries = [0];
+    for (var i = 0; i < validStations.length - 1; i++) {
+        var a = validStations[i];
+        var b = validStations[i + 1];
+        var wA = 1 / (a.crossTrack + 5);
+        var wB = 1 / (b.crossTrack + 5);
+        boundaries.push(a.distFromDep + (b.distFromDep - a.distFromDep) * (wA / (wA + wB)));
+    }
+    boundaries.push(totalDist);
+
     var totalTime = 0;
     var weightedHeadwind = 0;
     var coveredDist = 0;
-    var count = 0;
 
-    for (var i = 0; i < stations.length; i++) {
-        var stn = stations[i];
-        var wind = interpolateWind(routeWindData.stationWinds[stn.id], cruiseAlt);
-        if (!wind) continue;
-
-        var segStart = (i === 0) ? 0 : (stations[i - 1].distFromDep + stn.distFromDep) / 2;
-        var segEnd = (i === stations.length - 1) ? totalDist : (stn.distFromDep + stations[i + 1].distFromDep) / 2;
-        var segDist = segEnd - segStart;
+    for (var j = 0; j < validStations.length; j++) {
+        var segDist = boundaries[j + 1] - boundaries[j];
         if (segDist <= 0) continue;
 
-        var comp = windComponents(wind.direction, wind.speed, trueCourse);
+        var comp = windComponents(validStations[j].wind.direction, validStations[j].wind.speed, trueCourse);
         var segGS = Math.max(50, tas - comp.headwind);
-        var segTime = segDist / segGS; // hours
+        var segTime = segDist / segGS;
 
         totalTime += segTime;
         weightedHeadwind += comp.headwind * segTime;
         coveredDist += segDist;
-        count++;
     }
 
-    if (count === 0) {
-        return { available: false, gs: tas, windComponent: 0, description: 'No wind data' };
-    }
-
-    // Fill uncovered distance with TAS
     if (coveredDist < totalDist) {
         totalTime += (totalDist - coveredDist) / tas;
     }
 
     var effectiveGS = Math.round(totalDist / totalTime);
-    // Time-weighted average headwind component
     var avgHeadwind = Math.round(weightedHeadwind / totalTime);
     var desc = avgHeadwind > 0
         ? avgHeadwind + 'kt headwind'
@@ -627,7 +637,7 @@ function getWindSummary(routeWindData, cruiseAlt, trueCourse, tas) {
         available: true,
         gs: effectiveGS,
         windComponent: avgHeadwind,
-        stationCount: count,
+        stationCount: validStations.length,
         description: desc
     };
 }
