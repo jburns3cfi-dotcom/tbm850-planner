@@ -103,9 +103,9 @@
     }
 
     #departure-time-input {
-        width: 110px;
+        width: 100px;
         padding: 10px 14px;
-        font-size: 22px;
+        font-size: 24px;
         font-weight: 600;
         font-family: 'SF Mono', 'Menlo', 'Courier New', monospace;
         color: var(--text-primary, #e0e8f0);
@@ -113,7 +113,7 @@
         border: 1px solid var(--border, #2a3040);
         border-radius: 10px;
         text-align: center;
-        letter-spacing: 1px;
+        letter-spacing: 3px;
         -webkit-appearance: none;
         appearance: none;
         outline: none;
@@ -123,6 +123,12 @@
     #departure-time-input:focus {
         border-color: #3b82f6;
         box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+
+    #departure-time-input::placeholder {
+        letter-spacing: 1px;
+        font-size: 16px;
+        color: var(--text-label, #556);
     }
 
     .time-suffix {
@@ -208,10 +214,14 @@
             <!-- Time Input Row -->
             <div class="time-input-row">
                 <div class="time-input-wrapper">
-                    <input type="time"
+                    <input type="text"
                            id="departure-time-input"
-                           step="60"
-                           autocomplete="off">
+                           inputmode="numeric"
+                           pattern="[0-9]{4}"
+                           maxlength="4"
+                           placeholder="1430"
+                           autocomplete="off"
+                           autocorrect="off">
                     <span class="time-suffix">L</span>
                 </div>
                 <span class="timezone-badge" id="timezone-label">&mdash;</span>
