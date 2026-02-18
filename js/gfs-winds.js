@@ -14,6 +14,45 @@
 // Global wind cache — bridges GFS data to flight-calc.js
 var _gfsWindCache = null;
 
+// ============================================================
+// WIND MATH — headwind/crosswind and ground speed
+// ============================================================
+
+// Decompose wind into headwind and crosswind components
+// windDir: direction wind is FROM (degrees true)
+// windSpd: wind speed (knots)
+// course: aircraft track (degrees true)
+// Returns: { headwind, crosswind } — positive headwind = into the face
+function windComponents(windDir, windSpd, course) {
+    var angle = (windDir - course) * Math.PI / 180;
+    return {
+        headwind:  Math.round(windSpd * Math.cos(angle) * 10) / 10,
+        crosswind: Math.round(windSpd * Math.sin(angle) * 10) / 10
+    };
+}
+
+// Calculate ground speed using wind triangle
+// tas: true airspeed (knots)
+// windDir: direction wind is FROM (degrees true)
+// windSpd: wind speed (knots)
+// course: desired ground track (degrees true)
+// Returns: ground speed (knots)
+function windTriangleGS(tas, windDir, windSpd, course) {
+    var windAngle = (windDir - course) * Math.PI / 180;
+    var headwind = windSpd * Math.cos(windAngle);
+    var crosswind = windSpd * Math.sin(windAngle);
+
+    // Exact wind triangle: GS² = TAS² - crosswind² then subtract headwind
+    var tasSquared = tas * tas;
+    var crossSquared = crosswind * crosswind;
+    if (crossSquared >= tasSquared) {
+        // Wind too strong — can't maintain track (shouldn't happen in practice)
+        return Math.max(10, tas - windSpd);
+    }
+    var gs = Math.sqrt(tasSquared - crossSquared) - headwind;
+    return Math.max(10, Math.round(gs));
+}
+
 // Proxy URL — same worker as NOAA winds aloft
 var GFS_PROXY_URL = 'https://tbm850-proxy.jburns3cfi.workers.dev/?url=';
 
