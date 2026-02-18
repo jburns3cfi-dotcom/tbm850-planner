@@ -423,10 +423,13 @@ async function fetchGFSWinds(dep, dest, departureTimeZ) {
 
     console.log('[GFS] Sample URL: ' + urls[0]);
 
-    // 6. Fetch all in parallel via proxy
-    var fetchPromises = urls.map(function(url) {
+    // 6. Fetch in batches to avoid NOMADS rate limits
+    //    5 concurrent requests per batch, 400ms between batches
+    var BATCH_SIZE = 5;
+    var BATCH_DELAY = 400; // ms between batches
+
+    function fetchOnePoint(url) {
         var proxyUrl = GFS_PROXY_URL + encodeURIComponent(url);
-        // Timeout with broad browser compatibility
         var controller = new AbortController();
         var timeoutId = setTimeout(function() { controller.abort(); }, 15000);
         return fetch(proxyUrl, { signal: controller.signal })
@@ -438,19 +441,58 @@ async function fetchGFSWinds(dep, dest, departureTimeZ) {
                 }
                 return resp.text();
             })
+            .then(function(text) {
+                // Detect HTML error pages returned with HTTP 200
+                if (text && (text.indexOf('GrADS Data Server - error') !== -1 ||
+                             text.indexOf('<html') !== -1 ||
+                             text.indexOf('not an available') !== -1)) {
+                    console.warn('[GFS] Server returned error page for waypoint');
+                    return null;
+                }
+                return text;
+            })
             .catch(function(err) {
                 clearTimeout(timeoutId);
                 console.warn('[GFS] Fetch error: ' + err.message);
                 return null;
             });
-    });
+    }
 
-    var responses;
-    try {
-        responses = await Promise.all(fetchPromises);
-    } catch (e) {
-        console.error('[GFS] Promise.all failed:', e.message);
-        return null;
+    function delay(ms) {
+        return new Promise(function(resolve) { setTimeout(resolve, ms); });
+    }
+
+    // Process in batches
+    var responses = new Array(urls.length);
+    for (var b = 0; b < urls.length; b += BATCH_SIZE) {
+        var batchEnd = Math.min(b + BATCH_SIZE, urls.length);
+        var batchPromises = [];
+        for (var bi = b; bi < batchEnd; bi++) {
+            batchPromises.push(fetchOnePoint(urls[bi]));
+        }
+        var batchResults = await Promise.all(batchPromises);
+        for (var br = 0; br < batchResults.length; br++) {
+            responses[b + br] = batchResults[br];
+        }
+        // Delay between batches (skip after last batch)
+        if (batchEnd < urls.length) {
+            await delay(BATCH_DELAY);
+        }
+    }
+
+    // Retry failed points once (single requests with delay)
+    var failedIndices = [];
+    for (var ri = 0; ri < responses.length; ri++) {
+        if (!responses[ri]) failedIndices.push(ri);
+    }
+    if (failedIndices.length > 0 && failedIndices.length <= 12) {
+        console.log('[GFS] Retrying ' + failedIndices.length + ' failed waypoints...');
+        await delay(800);
+        for (var fi = 0; fi < failedIndices.length; fi++) {
+            var idx = failedIndices[fi];
+            responses[idx] = await fetchOnePoint(urls[idx]);
+            if (fi < failedIndices.length - 1) await delay(300);
+        }
     }
 
     // 7. Parse responses and build wind data
