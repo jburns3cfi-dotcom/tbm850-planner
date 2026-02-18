@@ -79,7 +79,7 @@ const FuelStops = (() => {
     } catch (err) {
       console.error('[FuelStops] CAA load failed:', err);
       caaAirports = {};
-      caaLoaded = true; // Mark loaded so we don't retry forever
+      caaLoaded = true;
       return false;
     }
   }
@@ -88,12 +88,10 @@ const FuelStops = (() => {
   // FUEL PRICING LOOKUP
   // ========================================
 
-  // Check if airport is a CAA member
   function isCAA(icao) {
     return caaAirports && caaAirports[icao] ? true : false;
   }
 
-  // Get CAA data for an airport (or null)
   function getCAAData(icao) {
     if (!caaAirports || !caaAirports[icao]) return null;
     const d = caaAirports[icao];
@@ -108,7 +106,6 @@ const FuelStops = (() => {
     };
   }
 
-  // Fetch AirNav fuel data for a single airport
   async function fetchAirNavFuel(icao) {
     try {
       const resp = await fetch(`${AIRNAV_URL}/?id=${icao}`);
@@ -132,15 +129,10 @@ const FuelStops = (() => {
     }
   }
 
-  // Get fuel pricing for any airport — CAA first, AirNav fallback
   async function getAirportFuel(icao) {
     await init();
-
-    // Try CAA first
     const caa = getCAAData(icao);
     if (caa) return caa;
-
-    // Fall back to AirNav
     return await fetchAirNavFuel(icao);
   }
 
@@ -148,20 +140,16 @@ const FuelStops = (() => {
   // FUEL BURN CALCULATIONS
   // ========================================
 
-  // Calculate fuel burn for a given flight time (hours)
-  // Uses fltplan.com validated hourly method: 75 gal first hr, 65 gal each after
   function calcFuelBurn(hours) {
     if (hours <= 0) return 0;
     if (hours <= 1) return FUEL_HOUR1 * hours;
     return FUEL_HOUR1 + FUEL_HOURX * (hours - 1);
   }
 
-  // Calculate fuel remaining after a leg
   function fuelRemaining(startFuel, flightHours) {
     return startFuel - calcFuelBurn(flightHours);
   }
 
-  // Calculate max flight time before hitting minimum fuel
   function maxFlightTime(startFuel) {
     const available = startFuel - MIN_LANDING_GAL;
     if (available <= 0) return 0;
@@ -175,12 +163,11 @@ const FuelStops = (() => {
 
   const DEG2RAD = Math.PI / 180;
   const RAD2DEG = 180 / Math.PI;
-  const NM_PER_RAD = 3440.065; // Earth radius in nm
+  const NM_PER_RAD = 3440.065;
 
   function toRad(d) { return d * DEG2RAD; }
   function toDeg(r) { return r * RAD2DEG; }
 
-  // Great-circle distance in nm
   function gcDist(lat1, lon1, lat2, lon2) {
     const dLat = toRad(lat2 - lat1);
     const dLon = toRad(lon2 - lon1);
@@ -189,7 +176,6 @@ const FuelStops = (() => {
     return 2 * Math.asin(Math.sqrt(a)) * NM_PER_RAD;
   }
 
-  // Initial bearing from point 1 to point 2 (degrees true)
   function bearing(lat1, lon1, lat2, lon2) {
     const dLon = toRad(lon2 - lon1);
     const y = Math.sin(dLon) * Math.cos(toRad(lat2));
@@ -198,18 +184,14 @@ const FuelStops = (() => {
     return (toDeg(Math.atan2(y, x)) + 360) % 360;
   }
 
-  // Cross-track distance: perpendicular distance from a point to a great-circle route
-  // Returns distance in nm (absolute value)
   function crossTrackDist(pLat, pLon, startLat, startLon, endLat, endLon) {
-    const d13 = gcDist(startLat, startLon, pLat, pLon) / NM_PER_RAD; // angular dist
+    const d13 = gcDist(startLat, startLon, pLat, pLon) / NM_PER_RAD;
     const brng13 = toRad(bearing(startLat, startLon, pLat, pLon));
     const brng12 = toRad(bearing(startLat, startLon, endLat, endLon));
     const xt = Math.asin(Math.sin(d13) * Math.sin(brng13 - brng12));
     return Math.abs(xt * NM_PER_RAD);
   }
 
-  // Along-track distance: how far along the route (from start) is the closest point
-  // Returns distance in nm
   function alongTrackDist(pLat, pLon, startLat, startLon, endLat, endLon) {
     const d13 = gcDist(startLat, startLon, pLat, pLon) / NM_PER_RAD;
     const brng13 = toRad(bearing(startLat, startLon, pLat, pLon));
@@ -223,54 +205,146 @@ const FuelStops = (() => {
   // DESCENT PROFILE
   // ========================================
 
-  // Get descent distance for a given cruise altitude (feet)
-  // Returns distance in nm (real-world corrected)
   function getDescentDist(altitudeFt) {
-    // Find closest altitude in table
     const alts = Object.keys(DESCENT_DIST_NM).map(Number).sort((a, b) => b - a);
     for (const alt of alts) {
       if (altitudeFt >= alt) return DESCENT_DIST_NM[alt];
     }
-    return 27 * DESCENT_FACTOR; // fallback: FL100 descent
+    return 27 * DESCENT_FACTOR;
   }
 
   // ========================================
-  // AIRPORT FILTERING
+  // findCandidates — SYNCHRONOUS
   // ========================================
+  // Called by app.js: FuelStops.findCandidates(dep, dest, totalDist)
+  //
+  // dep/dest = airport objects from autocomplete
+  //   (.ident, .lat, .lon, .name, .municipality, .region, .elevation)
+  // totalDist = route distance in nm
+  //
+  // Returns array of:
+  //   { airport: {ident, name, municipality, region, ...},
+  //     distFromDep, distFromDest, distOffRoute }
+  //
+  // Uses global airportDB loaded by airports.js
+  // ========================================
+  function findCandidates(dep, dest, totalDist) {
+    if (typeof airportDB === 'undefined' || !airportDB || airportDB.length === 0) {
+      console.warn('[FuelStops] airportDB not available');
+      return [];
+    }
 
-  // Filter airports for fuel stop candidates along a route
-  function findCorridorAirports(allAirports, depLat, depLon, destLat, destLon, routeDist) {
-    const candidates = [];
-    const descentDist = 113; // Conservative: FL310 descent (~113nm with factor)
+    const depLat = parseFloat(dep.lat);
+    const depLon = parseFloat(dep.lon);
+    const destLat = parseFloat(dest.lat);
+    const destLon = parseFloat(dest.lon);
 
-    // Quick bounding box filter first (saves heavy trig on thousands of airports)
-    const minLat = Math.min(depLat, destLat) - 1.5; // ~90nm buffer
+    if (isNaN(depLat) || isNaN(depLon) || isNaN(destLat) || isNaN(destLon)) {
+      console.warn('[FuelStops] Invalid departure or destination coordinates');
+      return [];
+    }
+
+    // Conservative descent profile exclusion: FL310 worst case
+    const descentDist = DESCENT_DIST_NM[31000] || (101 * DESCENT_FACTOR);
+    const descentThreshold = totalDist - descentDist;
+
+    // Bounding box for quick filter
+    const minLat = Math.min(depLat, destLat) - 1.5;
     const maxLat = Math.max(depLat, destLat) + 1.5;
     const minLon = Math.min(depLon, destLon) - 2.0;
     const maxLon = Math.max(depLon, destLon) + 2.0;
 
-    for (const apt of allAirports) {
-      // Only medium and large airports
+    const candidates = [];
+
+    for (let i = 0; i < airportDB.length; i++) {
+      const apt = airportDB[i];
+
+      // Only medium and large airports — no grass strips
       if (apt.type !== 'medium_airport' && apt.type !== 'large_airport') continue;
 
-      const lat = parseFloat(apt.latitude_deg);
-      const lon = parseFloat(apt.longitude_deg);
+      // Skip departure and destination
+      if (apt.ident === dep.ident || apt.ident === dest.ident) continue;
+
+      const lat = parseFloat(apt.latitude_deg || apt.lat);
+      const lon = parseFloat(apt.longitude_deg || apt.lon);
       if (isNaN(lat) || isNaN(lon)) continue;
 
-      // Quick bounding box check
+      // Quick bounding box
       if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) continue;
 
-      // Cross-track distance (perpendicular to route)
+      // Cross-track distance (how far off the route centerline)
       const xtDist = crossTrackDist(lat, lon, depLat, depLon, destLat, destLon);
       if (xtDist > CORRIDOR_WIDTH_NM) continue;
 
-      // Along-track distance (how far from departure along route)
+      // Along-track distance (how far from departure along the route)
       const atDist = alongTrackDist(lat, lon, depLat, depLon, destLat, destLon);
 
       // Must be ≥200nm from departure
       if (atDist < MIN_STOP_SPACING_NM) continue;
 
-      // Must not be behind us or past the destination
+      // Must not be behind us or past destination
+      if (atDist < 0 || atDist > totalDist) continue;
+
+      // Skip airports inside descent profile
+      if (atDist > descentThreshold) continue;
+
+      candidates.push({
+        airport: {
+          ident: apt.ident,
+          name: apt.name || '',
+          municipality: apt.municipality || '',
+          region: apt.iso_region || apt.region || '',
+          elevation: apt.elevation_ft || apt.elevation || 0,
+          lat: lat,
+          lon: lon,
+          type: apt.type
+        },
+        distFromDep: Math.round(atDist),
+        distFromDest: Math.round(totalDist - atDist),
+        distOffRoute: Math.round(xtDist * 10) / 10
+      });
+    }
+
+    // Sort: CAA airports first (if loaded), then closest to route centerline
+    candidates.sort((a, b) => {
+      const aCaa = (caaAirports && caaAirports[a.airport.ident]) ? 1 : 0;
+      const bCaa = (caaAirports && caaAirports[b.airport.ident]) ? 1 : 0;
+      if (bCaa !== aCaa) return bCaa - aCaa;
+      return a.distOffRoute - b.distOffRoute;
+    });
+
+    // Return top 8 candidates
+    const result = candidates.slice(0, 8);
+    console.log('[FuelStops] Found ' + result.length + ' fuel stop candidates from ' + candidates.length + ' in corridor');
+    return result;
+  }
+
+  // ========================================
+  // CORRIDOR SEARCH (internal, for advanced functions)
+  // ========================================
+  function findCorridorAirports(allAirports, depLat, depLon, destLat, destLon, routeDist) {
+    const candidates = [];
+
+    const minLat = Math.min(depLat, destLat) - 1.5;
+    const maxLat = Math.max(depLat, destLat) + 1.5;
+    const minLon = Math.min(depLon, destLon) - 2.0;
+    const maxLon = Math.max(depLon, destLon) + 2.0;
+
+    for (const apt of allAirports) {
+      if (apt.type !== 'medium_airport' && apt.type !== 'large_airport') continue;
+
+      const lat = parseFloat(apt.latitude_deg || apt.lat);
+      const lon = parseFloat(apt.longitude_deg || apt.lon);
+      if (isNaN(lat) || isNaN(lon)) continue;
+
+      if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) continue;
+
+      const xtDist = crossTrackDist(lat, lon, depLat, depLon, destLat, destLon);
+      if (xtDist > CORRIDOR_WIDTH_NM) continue;
+
+      const atDist = alongTrackDist(lat, lon, depLat, depLon, destLat, destLon);
+
+      if (atDist < MIN_STOP_SPACING_NM) continue;
       if (atDist < 0 || atDist > routeDist) continue;
 
       candidates.push({
@@ -288,44 +362,24 @@ const FuelStops = (() => {
       });
     }
 
-    // Sort by along-track distance (closest to midpoint preferred for single-stop)
     candidates.sort((a, b) => a.alongTrackNM - b.alongTrackNM);
     return candidates;
   }
 
   // ========================================
-  // MAIN FUEL STOP LOGIC
+  // ADVANCED: findFuelStops (async, full analysis)
   // ========================================
-
-  /**
-   * findFuelStops — Main entry point
-   *
-   * @param {Object} params
-   * @param {Object} params.departure    — {icao, lat, lon, elev}
-   * @param {Object} params.destination  — {icao, lat, lon, elev}
-   * @param {number} params.routeDistance — Total route distance in nm
-   * @param {Array}  params.topAltitudes — Top 3 altitude options from wind optimization
-   *   Each: {altitude, flightTimeHours, cruiseTAS}
-   * @param {Array}  params.allAirports  — Full airport array (from CSV)
-   *
-   * @returns {Object} Fuel stop results
-   */
   async function findFuelStops(params) {
     const { departure, destination, routeDistance, topAltitudes, allAirports } = params;
 
-    // Make sure CAA data is loaded
     await init();
 
-    // ---- Step 1: Do we need a fuel stop? ----
-    // Check if ANY of the top 3 altitudes has flight time ≥3:30
     const needsStop = topAltitudes.some(a => a.flightTimeHours >= FUEL_STOP_TRIGGER_HRS);
 
-    // Get fuel pricing for departure and destination regardless
     const depFuel = await getAirportFuel(departure.icao);
     const destFuel = await getAirportFuel(destination.icao);
 
     if (!needsStop) {
-      // Verify we actually land with ≥75 gal for each altitude
       const altResults = topAltitudes.map(a => {
         const burn = calcFuelBurn(a.flightTimeHours);
         const remaining = MAX_FUEL_GAL - burn;
@@ -338,7 +392,6 @@ const FuelStops = (() => {
         };
       });
 
-      // Double-check: even if under 3:30, verify fuel is safe
       const anyUnsafe = altResults.some(a => !a.safeToFly);
 
       if (!anyUnsafe) {
@@ -351,10 +404,8 @@ const FuelStops = (() => {
           stops: []
         };
       }
-      // If somehow fuel is tight even under 3:30, fall through to find stops
     }
 
-    // ---- Step 2: Find candidate airports in corridor ----
     const corridorAirports = findCorridorAirports(
       allAirports,
       departure.lat, departure.lon,
@@ -364,77 +415,50 @@ const FuelStops = (() => {
 
     console.log(`[FuelStops] Found ${corridorAirports.length} corridor candidates`);
 
-    // ---- Step 3: Get the highest altitude's descent distance ----
-    // Use the highest altitude among top 3 for descent profile exclusion
     const maxAlt = Math.max(...topAltitudes.map(a => a.altitude));
     const descentDist = getDescentDist(maxAlt);
-
-    // ---- Step 4: Filter out airports in the destination descent profile ----
-    // Unless we absolutely need one there (fuel critical)
     const descentThreshold = routeDistance - descentDist;
 
-    // ---- Step 5: Determine stop placement per altitude ----
-    // We plan fuel stops for the WORST case (longest flight time) among top 3
     const worstAlt = topAltitudes.reduce((a, b) =>
       a.flightTimeHours > b.flightTimeHours ? a : b
     );
 
-    // Calculate max leg time (hours) before hitting 75 gal reserve
     const maxLegTime = maxFlightTime(MAX_FUEL_GAL);
-    console.log(`[FuelStops] Max leg time: ${maxLegTime.toFixed(2)} hrs, worst route: ${worstAlt.flightTimeHours.toFixed(2)} hrs`);
-
-    // Estimate leg distance based on worst-case TAS
-    const cruiseTAS = worstAlt.cruiseTAS || 280; // fallback TAS
+    const cruiseTAS = worstAlt.cruiseTAS || 280;
     const maxLegDist = maxLegTime * cruiseTAS;
-
-    // ---- Step 6: How many stops do we need? ----
-    // Rough estimate: divide route by max leg distance
     const numStops = Math.ceil(routeDistance / maxLegDist) - 1;
-    console.log(`[FuelStops] Estimated stops needed: ${numStops}`);
 
-    // ---- Step 7: Find best stop candidates ----
-    // Ideal placement: divide route into equal legs
     const stops = [];
 
     for (let s = 0; s < numStops; s++) {
       const idealDist = routeDistance * (s + 1) / (numStops + 1);
       const minDist = (s === 0) ? MIN_STOP_SPACING_NM : stops[s - 1].alongTrackNM + MIN_STOP_SPACING_NM;
 
-      // Filter candidates for this stop position
       let viable = corridorAirports.filter(apt => {
-        // Must be past minimum distance
         if (apt.alongTrackNM < minDist) return false;
 
-        // Check if in descent profile — skip if we can make it without
         if (apt.alongTrackNM > descentThreshold) {
-          // Airport is in descent profile zone
-          // Only allow if we truly cannot reach destination
           const legTimeToHere = apt.alongTrackNM / cruiseTAS;
-          const fuelAtThisPoint = fuelRemaining(MAX_FUEL_GAL, legTimeToHere);
           const remainingDist = routeDistance - apt.alongTrackNM;
           const remainingTime = remainingDist / cruiseTAS;
           const fuelAtDest = fuelRemaining(MAX_FUEL_GAL, legTimeToHere + remainingTime);
-          if (fuelAtDest >= MIN_LANDING_GAL) return false; // Can make it, skip this stop
+          if (fuelAtDest >= MIN_LANDING_GAL) return false;
         }
 
-        // Must leave enough distance to reach destination
-        if (apt.distFromDest < 50) return false; // Too close to destination
+        if (apt.distFromDest < 50) return false;
 
         return true;
       });
 
       if (viable.length === 0) continue;
 
-      // ---- Step 8: Score and rank candidates ----
-      // Prefer CAA airports, then closest to ideal placement, then lowest off-route penalty
       const scored = await scoreAndRankCandidates(viable, idealDist);
 
       if (scored.length > 0) {
-        stops.push(scored[0]); // Best candidate for this stop position
+        stops.push(scored[0]);
       }
     }
 
-    // ---- Step 9: Build final results with fuel analysis ----
     const result = await buildFuelPlan(departure, destination, stops, topAltitudes, routeDistance, depFuel, destFuel);
 
     return result;
@@ -443,27 +467,18 @@ const FuelStops = (() => {
   // ========================================
   // SCORING & RANKING
   // ========================================
-
   async function scoreAndRankCandidates(candidates, idealDistNM) {
     const scored = [];
 
     for (const apt of candidates) {
       const caaData = getCAAData(apt.icao);
       let fuelData = caaData;
-
-      // If not CAA, we'll note it but won't fetch AirNav yet for all candidates
-      // (too many network calls) — we'll fetch AirNav only for top candidates
       const isCaa = !!caaData;
 
-      // Distance from ideal placement (penalty for being far from optimal)
       const placementError = Math.abs(apt.alongTrackNM - idealDistNM);
 
-      // Score: lower is better
-      // CAA airports get a big bonus (subtract 500 from score)
-      // Off-route penalty (crossTrackNM * 10)
-      // Placement error penalty
       let score = placementError + (apt.crossTrackNM * 10);
-      if (isCaa) score -= 500; // Strong preference for CAA
+      if (isCaa) score -= 500;
 
       scored.push({
         ...apt,
@@ -474,10 +489,8 @@ const FuelStops = (() => {
       });
     }
 
-    // Sort by score (lowest = best)
     scored.sort((a, b) => a.score - b.score);
 
-    // For the top 5 non-CAA candidates, fetch AirNav data
     let airnavFetches = 0;
     for (const s of scored) {
       if (!s.isCaa && airnavFetches < 5) {
@@ -492,9 +505,7 @@ const FuelStops = (() => {
   // ========================================
   // BUILD FINAL FUEL PLAN
   // ========================================
-
   async function buildFuelPlan(departure, destination, stops, topAltitudes, routeDistance, depFuel, destFuel) {
-    // Calculate leg-by-leg fuel analysis for each altitude
     const altitudeAnalysis = [];
 
     for (const alt of topAltitudes) {
@@ -503,11 +514,10 @@ const FuelStops = (() => {
       let prevPoint = departure;
       let prevDistAlong = 0;
 
-      // Build legs through each stop
       for (let i = 0; i < stops.length; i++) {
         const stop = stops[i];
         const legDist = stop.alongTrackNM - prevDistAlong;
-        const legTime = legDist / cruiseTAS; // Simplified — main app should recalc with winds
+        const legTime = legDist / cruiseTAS;
         const legFuel = calcFuelBurn(legTime);
 
         legs.push({
@@ -517,14 +527,13 @@ const FuelStops = (() => {
           timeHrs: Math.round(legTime * 100) / 100,
           fuelBurn: Math.round(legFuel),
           fuelRemaining: Math.round(MAX_FUEL_GAL - legFuel),
-          departFuel: MAX_FUEL_GAL // Always fill to capacity
+          departFuel: MAX_FUEL_GAL
         });
 
         prevPoint = stop;
         prevDistAlong = stop.alongTrackNM;
       }
 
-      // Final leg: last stop (or departure) to destination
       const finalDist = routeDistance - prevDistAlong;
       const finalTime = finalDist / cruiseTAS;
       const finalFuel = calcFuelBurn(finalTime);
@@ -548,10 +557,8 @@ const FuelStops = (() => {
       });
     }
 
-    // Build stop details with all fuel info
     const stopDetails = [];
     for (const stop of stops) {
-      // Get fuel data — should already have it from scoring, but ensure
       let fuelInfo = stop.fuelData;
       if (!fuelInfo) {
         fuelInfo = await getAirportFuel(stop.icao);
@@ -592,16 +599,8 @@ const FuelStops = (() => {
   }
 
   // ========================================
-  // ALTERNATIVE STOPS — Get runner-up options
+  // ALTERNATIVE STOPS
   // ========================================
-
-  /**
-   * getAlternateStops — Returns additional fuel stop options beyond the primary pick
-   * Useful for showing pilot 2-3 choices along the route
-   *
-   * @param {Object} params — Same as findFuelStops
-   * @param {number} count — How many alternates to return (default 3)
-   */
   async function getAlternateStops(params, count = 3) {
     const { departure, destination, routeDistance, topAltitudes, allAirports } = params;
     await init();
@@ -616,7 +615,6 @@ const FuelStops = (() => {
     const idealDist = routeDistance / 2;
     const scored = await scoreAndRankCandidates(corridorAirports, idealDist);
 
-    // Return top N with full fuel data
     const alternates = [];
     for (let i = 0; i < Math.min(count + 1, scored.length); i++) {
       const s = scored[i];
@@ -647,18 +645,21 @@ const FuelStops = (() => {
   // ========================================
   // PUBLIC API
   // ========================================
-
   return {
-    init,                  // Call once on app load to prefetch CAA data
-    findFuelStops,         // Main function — determines if stop needed, finds best options
-    getAlternateStops,     // Get additional stop options for pilot choice
-    getAirportFuel,        // Get fuel pricing for any single airport
-    isCAA,                 // Quick check if an airport is CAA member
-    calcFuelBurn,          // Calculate fuel burn for a given flight time
-    fuelRemaining,         // Calculate remaining fuel after a leg
-    maxFlightTime,         // Max flight time from a given fuel load
+    // Called by app.js — synchronous, returns candidate array
+    findCandidates,
 
-    // Constants exposed for display
+    // Advanced async functions for future use
+    init,
+    findFuelStops,
+    getAlternateStops,
+    getAirportFuel,
+    isCAA,
+    calcFuelBurn,
+    fuelRemaining,
+    maxFlightTime,
+
+    // Constants
     MAX_FUEL: MAX_FUEL_GAL,
     MIN_LANDING: MIN_LANDING_GAL,
     TRIGGER_HOURS: FUEL_STOP_TRIGGER_HRS
