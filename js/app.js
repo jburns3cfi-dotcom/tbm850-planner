@@ -1,17 +1,15 @@
 // ============================================================
 // APP MODULE — TBM850 Apple Flight Planner
 // UI wiring, state management, event handlers
-// Requires: airports.js, performance.js, route.js, winds.js,
-//           gfs-winds.js, flight-calc.js
+// Requires: airports.js, performance.js, route.js, flight-calc.js
+// Optional: gfs-winds.js (for wind-corrected calculations)
 // ============================================================
 
 var appState = {
     departure: null,
     destination: null,
     lastResults: null,
-    selectedDay: 0,       // 0 = today, 1 = tomorrow, etc.
-    departureTime: '',    // military time string e.g. "1430"
-    forecastHr: '06'      // NOAA forecast period: '06','12','24'
+    gfsData: null
 };
 
 // ============================================================
@@ -21,8 +19,8 @@ function initApp() {
     updateStatus('loading', 'Loading airports...');
 
     var csvUrls = [
-        'us-airports.csv',
-        'data/us-airports.csv'
+        'data/us-airports.csv',
+        'https://raw.githubusercontent.com/jburns3cfi-dotcom/tbm850-planner/main/us-airports.csv'
     ];
 
     tryLoadAirports(csvUrls, 0, function(err) {
@@ -31,7 +29,6 @@ function initApp() {
             return;
         }
         updateStatus('ok', airportDB.length + ' airports loaded');
-
         setupAutocomplete('dep-input', 'dep-dropdown', 'dep-info', function(apt) {
             appState.departure = apt;
             checkReady();
@@ -40,11 +37,7 @@ function initApp() {
             appState.destination = apt;
             checkReady();
         });
-
         document.getElementById('btn-calc').addEventListener('click', runCalculation);
-
-        initDaySelector();
-        initTimeInput();
 
         document.getElementById('dep-input').focus();
     });
@@ -64,126 +57,6 @@ function tryLoadAirports(urls, idx, callback) {
         }
     });
 }
-
-
-// ============================================================
-// DAY & TIME SELECTOR
-// ============================================================
-function initDaySelector() {
-    var container = document.getElementById('day-pills');
-    if (!container) return;
-
-    var days = ['Today', 'Tmrw'];
-    var now = new Date();
-    for (var i = 2; i < 7; i++) {
-        var d = new Date(now);
-        d.setDate(d.getDate() + i);
-        days.push(d.toLocaleDateString('en-US', { weekday: 'short' }));
-    }
-
-    container.innerHTML = '';
-    for (var j = 0; j < days.length; j++) {
-        var pill = document.createElement('button');
-        pill.className = 'day-pill' + (j === 0 ? ' active' : '');
-        pill.textContent = days[j];
-        pill.dataset.day = j;
-        pill.addEventListener('click', function() {
-            container.querySelectorAll('.day-pill').forEach(function(p) {
-                p.classList.remove('active');
-            });
-            this.classList.add('active');
-            appState.selectedDay = parseInt(this.dataset.day);
-            updateForecastPeriod();
-            updateZuluDisplay();
-        });
-        container.appendChild(pill);
-    }
-}
-
-function initTimeInput() {
-    var input = document.getElementById('dep-time');
-    if (!input) return;
-
-    // Default to current time rounded to next 30 min
-    var now = new Date();
-    var mins = now.getMinutes();
-    var roundedMins = mins < 30 ? 30 : 0;
-    var hrs = mins < 30 ? now.getHours() : now.getHours() + 1;
-    if (hrs >= 24) hrs = 0;
-    appState.departureTime = padTwo(hrs) + padTwo(roundedMins);
-    input.value = appState.departureTime;
-
-    input.addEventListener('input', function() {
-        appState.departureTime = input.value.replace(/[^0-9]/g, '').substring(0, 4);
-        updateForecastPeriod();
-        updateZuluDisplay();
-    });
-
-    updateForecastPeriod();
-    updateZuluDisplay();
-}
-
-function padTwo(n) {
-    return (n < 10 ? '0' : '') + n;
-}
-
-
-// ============================================================
-// ZULU TIME & FORECAST PERIOD
-// ============================================================
-function getDepDateTime() {
-    var now = new Date();
-    var depDate = new Date(now);
-    depDate.setDate(depDate.getDate() + appState.selectedDay);
-
-    var timeStr = appState.departureTime || '0000';
-    while (timeStr.length < 4) timeStr = '0' + timeStr;
-    var hrs = parseInt(timeStr.substring(0, 2)) || 0;
-    var mins = parseInt(timeStr.substring(2, 4)) || 0;
-    depDate.setHours(hrs, mins, 0, 0);
-
-    return depDate;
-}
-
-function updateZuluDisplay() {
-    var zuluEl = document.getElementById('zulu-display');
-    if (!zuluEl) return;
-
-    var depLocal = getDepDateTime();
-    var zuluHrs = depLocal.getUTCHours();
-    var zuluMins = depLocal.getUTCMinutes();
-    zuluEl.textContent = padTwo(zuluHrs) + padTwo(zuluMins) + 'Z';
-}
-
-function updateForecastPeriod() {
-    var depLocal = getDepDateTime();
-    var now = new Date();
-    var hoursOut = (depLocal - now) / (1000 * 60 * 60);
-
-    // Pick best NOAA forecast period
-    if (hoursOut <= 6) {
-        appState.forecastHr = '06';
-    } else if (hoursOut <= 12) {
-        appState.forecastHr = '12';
-    } else if (hoursOut <= 24) {
-        appState.forecastHr = '24';
-    } else {
-        appState.forecastHr = '24'; // best we have
-    }
-
-    // Update forecast indicator
-    var indEl = document.getElementById('forecast-indicator');
-    if (indEl) {
-        if (hoursOut > 30) {
-            indEl.className = 'forecast-badge forecast-warn';
-            indEl.textContent = appState.forecastHr + 'hr (>30hr out)';
-        } else {
-            indEl.className = 'forecast-badge forecast-ok';
-            indEl.textContent = appState.forecastHr + 'hr fcst';
-        }
-    }
-}
-
 
 // ============================================================
 // AUTOCOMPLETE
@@ -300,9 +173,8 @@ function escHTML(s) {
     return d.innerHTML;
 }
 
-
 // ============================================================
-// CALCULATION — Async with GFS wind integration
+// CALCULATION — async to allow GFS wind fetch
 // ============================================================
 function checkReady() {
     var btn = document.getElementById('btn-calc');
@@ -315,98 +187,92 @@ async function runCalculation() {
     var dep = appState.departure;
     var dest = appState.destination;
     var btn = document.getElementById('btn-calc');
-
-    // Show loading state
     btn.disabled = true;
-    btn.textContent = 'Calculating...';
-    updateWindStatus('loading', 'Fetching winds aloft...');
+    btn.textContent = 'Fetching winds...';
 
-    var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
-    var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
-
-    // Magnetic variation (approximate for CONUS)
-    var magVar = Math.round(-6.0 + (dep.lon + 90) * 0.19 + (dep.lat - 37) * 0.05);
-    var magCourse = Math.round(((trueCourse + magVar) + 360) % 360);
-
-    // Get departure time as UTC Date for GFS forecast hour selection
-    var departureTimeZ = getDepDateTime();
-
-    // ---- Step 1: Fetch GFS gridded winds ----
-    // This also populates _gfsWindCache for climb/descent corrections
+    // Step 1: Fetch GFS winds along route
     var gfsData = null;
-    var windPtCount = 0;
-
-    try {
-        gfsData = await fetchGFSWinds(
-            { icao: dep.ident, lat: dep.lat, lon: dep.lon },
-            { icao: dest.ident, lat: dest.lat, lon: dest.lon },
-            departureTimeZ
-        );
-        if (gfsData && gfsData.pointCount) {
-            windPtCount = gfsData.pointCount;
+    if (typeof fetchGFSWinds === 'function') {
+        try {
+            updateStatus('loading', 'Fetching GFS winds...');
+            gfsData = await fetchGFSWinds(dep, dest, null);
+            appState.gfsData = gfsData;
+            if (gfsData) {
+                updateStatus('ok', 'GFS winds loaded (' + gfsData.pointCount + ' pts)');
+            } else {
+                updateStatus('ok', 'No wind data — using still-air');
+            }
+        } catch (e) {
+            console.error('[GFS] Wind fetch failed:', e.message);
+            updateStatus('ok', 'Wind fetch failed — using still-air');
         }
-    } catch (e) {
-        console.warn('[APP] GFS fetch failed:', e.message);
     }
 
-    // ---- Step 2: Calculate each altitude option ----
-    var altitudes = getTop3Altitudes(trueCourse);
-    var options = [];
+    btn.textContent = 'Calculating...';
 
+    // Step 2: Calculate true course and get altitude candidates
+    var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
+    var altitudes = getTop3Altitudes(trueCourse);
+
+    // Step 3: Loop altitudes, compute cruise GS from GFS, build flight plans
+    var results = [];
     for (var i = 0; i < altitudes.length; i++) {
         var alt = altitudes[i];
-        var perf = getPerformanceAtAltitude(alt);
-        var tas = perf.cruiseTAS;
-        var cruiseGS = tas;
-        var windSummary = null;
 
-        // Get wind-corrected cruise GS from GFS data
-        if (gfsData) {
-            cruiseGS = calculateGFSGroundSpeed(gfsData, alt, trueCourse, tas);
-            windSummary = getGFSWindSummary(gfsData, alt, trueCourse, tas);
-            if (windSummary && windSummary.available) {
-                windSummary.stationCount = windPtCount;
-            }
+        // Get cruise TAS and wind-corrected GS at this altitude
+        var cruiseTAS = getCruiseTAS(alt);
+        var cruiseGS = cruiseTAS;
+        if (gfsData && typeof calculateGFSGroundSpeed === 'function') {
+            cruiseGS = calculateGFSGroundSpeed(gfsData, alt, trueCourse, cruiseTAS);
         }
 
-        // Calculate full flight plan
-        // Climb/descent wind corrections auto-detected via _gfsWindCache
-        var plan = calculateFlight(dep, dest, alt, cruiseGS);
+        // Calculate flight with wind-corrected cruise GS and GFS data
+        // (flight-calc.js will also auto-detect _gfsWindCache for climb/descent)
+        var plan = calculateFlight(dep, dest, alt, cruiseGS, gfsData);
 
-        // Attach wind info for display
-        plan.windSummary = windSummary;
-        plan.windPtCount = windPtCount;
-
-        options.push(plan);
+        if (plan.viable) {
+            results.push(plan);
+        }
     }
 
-    // Sort by total time ascending (best first)
-    options.sort(function(a, b) { return a.totals.timeMin - b.totals.timeMin; });
+    // If all standard altitudes were non-viable (short route), try lower
+    if (results.length === 0) {
+        console.log('[APP] All standard altitudes non-viable, trying lower FLs');
+        var lowerAlts = [24000, 22000, 20000, 18000];
+        for (var j = 0; j < lowerAlts.length; j++) {
+            var cruiseTAS2 = getCruiseTAS(lowerAlts[j]);
+            var cruiseGS2 = cruiseTAS2;
+            if (gfsData && typeof calculateGFSGroundSpeed === 'function') {
+                cruiseGS2 = calculateGFSGroundSpeed(gfsData, lowerAlts[j], trueCourse, cruiseTAS2);
+            }
+            var lowPlan = calculateFlight(dep, dest, lowerAlts[j], cruiseGS2, gfsData);
+            if (lowPlan.viable) {
+                results.push(lowPlan);
+                if (results.length >= 3) break;
+            }
+        }
+    }
 
-    var results = {
+    // Last resort
+    if (results.length === 0) {
+        var minPlan = calculateFlight(dep, dest, 18000, getCruiseTAS(18000), gfsData);
+        minPlan.viable = true;
+        minPlan.warning = 'Route very short — climb/descent dominate';
+        results.push(minPlan);
+    }
+
+    var output = {
         trueCourse: Math.round(trueCourse),
-        magCourse: magCourse,
         direction: trueCourse < 180 ? 'Eastbound' : 'Westbound',
-        options: options,
-        windStatus: gfsData ? 'ok' : 'failed',
-        windStationCount: windPtCount
+        options: results
     };
 
-    appState.lastResults = results;
-
-    // Update wind status display
-    if (gfsData) {
-        updateWindStatus('ok', 'Winds applied (' + windPtCount + ' grid pts)');
-    } else {
-        updateWindStatus('warn', 'Wind fetch failed — using TAS only');
-    }
-
-    displayResults(results, dep, dest);
+    appState.lastResults = output;
+    displayResults(output, dep, dest);
 
     btn.disabled = false;
-    btn.textContent = 'Calculate Flight Plan';
+    btn.textContent = 'Calculate';
 }
-
 
 // ============================================================
 // RESULTS DISPLAY
@@ -417,59 +283,59 @@ function displayResults(results, dep, dest) {
 
     var totalDist = greatCircleDistance(dep.lat, dep.lon, dest.lat, dest.lon);
 
-    // Route summary
+    document.getElementById('sum-route').textContent = dep.ident + ' → ' + dest.ident;
     document.getElementById('sum-dist').textContent = Math.round(totalDist);
+    document.getElementById('sum-course').textContent = results.trueCourse + '°';
+    document.getElementById('sum-dir').textContent = results.direction;
 
-    var courseEl = document.getElementById('sum-course');
-    if (courseEl) courseEl.textContent = results.trueCourse + '°';
-
-    var magEl = document.getElementById('sum-mag-course');
-    if (magEl) magEl.textContent = results.magCourse + '°M';
-
-    var dirEl = document.getElementById('sum-dir');
-    if (dirEl) dirEl.textContent = results.direction;
+    // Wind source indicator
+    var windSourceEl = document.getElementById('wind-source');
+    if (windSourceEl) {
+        if (appState.gfsData) {
+            windSourceEl.textContent = 'Winds: ' + appState.gfsData.source +
+                ' ' + appState.gfsData.cycle + ' (F+' + appState.gfsData.forecastHour + 'h)';
+            windSourceEl.style.display = '';
+        } else {
+            windSourceEl.textContent = 'Winds: still-air (no GFS data)';
+            windSourceEl.style.display = '';
+        }
+    }
 
     // Fuel stop check
     var fuelStopEl = document.getElementById('fuel-stop-indicator');
-    if (fuelStopEl) {
-        if (needsFuelStop(results)) {
-            fuelStopEl.innerHTML = '<span class="fuel-stop-badge">Fuel Stop Required</span>';
-        } else {
-            fuelStopEl.innerHTML = '';
-        }
+    if (needsFuelStop(results)) {
+        fuelStopEl.innerHTML = '<span class="fuel-stop-badge">Fuel Stop Required</span>';
+    } else {
+        fuelStopEl.innerHTML = '';
     }
 
     // Altitude options table
     var tbody = document.getElementById('alt-table-body');
     tbody.innerHTML = '';
 
-    // Best option is first (already sorted by time)
+    // Find best (shortest time) option
+    var bestIdx = 0;
+    for (var i = 1; i < results.options.length; i++) {
+        if (results.options[i].totals.timeMin < results.options[bestIdx].totals.timeMin) {
+            bestIdx = i;
+        }
+    }
+
     for (var i = 0; i < results.options.length; i++) {
         var plan = results.options[i];
         var tr = document.createElement('tr');
-        if (i === 0) tr.className = 'best';
+        if (i === bestIdx) tr.className = 'best';
 
-        // Determine GS class based on wind
-        var gsClass = '';
-        var gsDelta = '';
-        if (plan.windSummary && plan.windSummary.available) {
-            var comp = plan.windSummary.windComponent;
-            if (comp > 2) {
-                gsClass = ' class="gs-headwind"';
-                gsDelta = '<span class="gs-delta">−' + comp + '</span>';
-            } else if (comp < -2) {
-                gsClass = ' class="gs-tailwind"';
-                gsDelta = '<span class="gs-delta">+' + Math.abs(comp) + '</span>';
-            }
-        }
+        // Show warning for short-route plans
+        var flLabel = 'FL' + (plan.cruiseAlt / 100);
+        if (plan.warning) flLabel += ' ⚠';
 
         tr.innerHTML =
-            '<td>FL' + (plan.cruiseAlt / 100) + '</td>' +
+            '<td>' + flLabel + '</td>' +
             '<td>' + plan.totals.timeHrs + '</td>' +
             '<td>' + plan.totals.fuelGal + '</td>' +
             '<td>' + plan.cruise.tas + '</td>' +
-            '<td' + gsClass + '>' + Math.round(plan.cruise.groundSpeed) + gsDelta + '</td>';
-
+            '<td>' + Math.round(plan.cruise.groundSpeed) + '</td>';
         tr.addEventListener('click', (function(p) {
             return function() { displayPhaseDetail(p); };
         })(plan));
@@ -477,7 +343,7 @@ function displayResults(results, dep, dest) {
     }
 
     // Auto-show phase detail for best option
-    displayPhaseDetail(results.options[0]);
+    displayPhaseDetail(results.options[bestIdx]);
 
     section.scrollIntoView({ behavior: 'smooth' });
 }
@@ -485,55 +351,56 @@ function displayResults(results, dep, dest) {
 function displayPhaseDetail(plan) {
     var el = document.getElementById('phase-detail');
 
-    // Cruise wind info line
-    var windLine = '';
-    if (plan.windSummary && plan.windSummary.available) {
-        var wc = plan.windSummary.windComponent;
-        var windClass = wc > 0 ? 'headwind' : 'tailwind';
-        var windArrow = wc > 0 ? '↑' : '↓';
-        windLine = '<div class="phase-wind-info ' + windClass + '">' +
-            '<span class="wind-arrow">' + windArrow + '</span>' +
-            '<span class="wind-value">' + plan.windSummary.description + '</span>' +
-            ' · GS ' + plan.windSummary.gs + 'kt' +
-            ' (' + (plan.windPtCount || plan.windSummary.stationCount) + ' pts)' +
-            '</div>';
+    // Build wind annotation strings for climb/descent
+    var climbAnnotation = '';
+    var descentAnnotation = '';
+    if (plan.climb.distanceNM_nowind !== undefined &&
+        plan.climb.distanceNM !== plan.climb.distanceNM_nowind) {
+        var climbDelta = plan.climb.distanceNM - plan.climb.distanceNM_nowind;
+        var climbSign = climbDelta >= 0 ? '+' : '';
+        climbAnnotation = ' <span class="wind-annotation">(' +
+            climbSign + climbDelta.toFixed(1) + ' wind)</span>';
+    }
+    if (plan.descent.distanceNM_nowind !== undefined &&
+        plan.descent.distanceNM !== plan.descent.distanceNM_nowind) {
+        var desDelta = plan.descent.distanceNM - plan.descent.distanceNM_nowind;
+        var desSign = desDelta >= 0 ? '+' : '';
+        descentAnnotation = ' <span class="wind-annotation">(' +
+            desSign + desDelta.toFixed(1) + ' wind)</span>';
     }
 
-    // Climb wind correction annotation
-    var climbWindLine = '';
-    if (plan.climb.windCorrection && Math.abs(plan.climb.windCorrection) >= 0.5) {
-        var clbCorr = plan.climb.windCorrection;
-        var clbArrow = clbCorr > 0 ? '↓' : '↑';
-        climbWindLine = '<div class="phase-wind-info ' + (clbCorr > 0 ? 'tailwind' : 'headwind') + '">' +
-            '<span class="wind-arrow">' + clbArrow + '</span>' +
-            Math.abs(Math.round(clbCorr)) + 'nm wind correction' +
-            '</div>';
+    // Wind component for cruise
+    var cruiseWindNote = '';
+    if (plan.cruise.groundSpeed !== plan.cruise.tas) {
+        var delta = plan.cruise.groundSpeed - plan.cruise.tas;
+        var windType = delta >= 0 ? 'tailwind' : 'headwind';
+        cruiseWindNote = ' <span class="wind-annotation">(' +
+            Math.abs(Math.round(delta)) + 'kt ' + windType + ')</span>';
     }
 
-    // Descent wind correction annotation
-    var descentWindLine = '';
-    if (plan.descent.windCorrection && Math.abs(plan.descent.windCorrection) >= 0.5) {
-        var desCorr = plan.descent.windCorrection;
-        var desArrow = desCorr > 0 ? '↓' : '↑';
-        descentWindLine = '<div class="phase-wind-info ' + (desCorr > 0 ? 'tailwind' : 'headwind') + '">' +
-            '<span class="wind-arrow">' + desArrow + '</span>' +
-            Math.abs(Math.round(desCorr)) + 'nm wind correction' +
-            '</div>';
+    // Warning banner for short routes
+    var warningBanner = '';
+    if (plan.warning) {
+        warningBanner = '<div class="phase-warning">⚠ ' + plan.warning + '</div>';
     }
 
     el.innerHTML =
+        warningBanner +
         '<div class="card-title">FL' + (plan.cruiseAlt / 100) + ' Phase Breakdown</div>' +
         '<div class="phase-row header">' +
             '<div>Phase</div><div class="phase-value">Time</div>' +
             '<div class="phase-value">Fuel</div><div class="phase-value">Dist</div>' +
         '</div>' +
         phaseRow('Taxi', '—', plan.totals.taxiFuel + 'g', '—') +
-        phaseRow('Climb', formatTime(plan.climb.timeMin), plan.climb.fuelGal + 'g', plan.climb.distanceNM + 'nm') +
-        climbWindLine +
-        phaseRow('Cruise', formatTime(plan.cruise.timeMin), plan.cruise.fuelGal + 'g', plan.cruise.distanceNM + 'nm') +
-        windLine +
-        phaseRow('Descent', formatTime(plan.descent.timeMin), plan.descent.fuelGal + 'g', plan.descent.distanceNM + 'nm') +
-        descentWindLine +
+        phaseRow('Climb', formatTime(plan.climb.timeMin),
+            plan.climb.fuelGal + 'g',
+            plan.climb.distanceNM + 'nm' + climbAnnotation) +
+        phaseRow('Cruise', formatTime(plan.cruise.timeMin),
+            plan.cruise.fuelGal + 'g',
+            plan.cruise.distanceNM + 'nm' + cruiseWindNote) +
+        phaseRow('Descent', formatTime(plan.descent.timeMin),
+            plan.descent.fuelGal + 'g',
+            plan.descent.distanceNM + 'nm' + descentAnnotation) +
         '<div class="phase-row" style="border-top:1px solid var(--border);padding-top:8px;font-weight:700;">' +
             '<div class="phase-name">Total</div>' +
             '<div class="phase-value">' + plan.totals.timeHrs + '</div>' +
@@ -551,37 +418,15 @@ function phaseRow(name, time, fuel, dist) {
     '</div>';
 }
 
-
 // ============================================================
-// STATUS BAR & WIND STATUS
+// STATUS BAR
 // ============================================================
 function updateStatus(state, msg) {
     var dot = document.getElementById('status-dot');
     var text = document.getElementById('status-text');
-    if (dot) dot.className = 'status-dot ' + state;
-    if (text) text.textContent = msg;
+    dot.className = 'status-dot ' + state;
+    text.textContent = msg;
 }
-
-function updateWindStatus(state, msg) {
-    // Top wind status bar (inside results card)
-    var bar = document.getElementById('wind-status-bar');
-    if (bar) {
-        var dotClass = state === 'ok' ? 'ok' : (state === 'loading' ? 'loading' : 'error');
-        var barClass = state === 'ok' ? 'wind-ok' : 'wind-warn';
-        bar.className = 'wind-status-bar ' + barClass;
-        bar.innerHTML = '<span class="status-dot ' + dotClass + '"></span>' + escHTML(msg);
-        bar.style.display = 'flex';
-    }
-
-    // Bottom status bar footer
-    var footer = document.getElementById('wind-status-footer');
-    if (footer) {
-        var footerClass = state === 'ok' ? 'wind-footer-ok' : 'wind-footer-warn';
-        footer.className = 'wind-status-footer ' + footerClass;
-        footer.innerHTML = '<span class="status-dot ' + (state === 'ok' ? 'ok' : 'error') + '"></span>' + escHTML(msg);
-    }
-}
-
 
 // ============================================================
 // INIT ON LOAD
