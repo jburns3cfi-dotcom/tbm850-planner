@@ -311,7 +311,7 @@ async function runCalculation() {
     var results = [];
     for (var i = 0; i < altitudes.length; i++) {
         var alt = altitudes[i];
-        var cruiseTAS = getCruiseTAS(alt);
+        var cruiseTAS = getPerformanceAtAltitude(alt).cruiseTAS;
         var cruiseGS = cruiseTAS;
         if (gfsData && typeof calculateGFSGroundSpeed === 'function') {
             cruiseGS = calculateGFSGroundSpeed(gfsData, alt, trueCourse, cruiseTAS);
@@ -326,7 +326,7 @@ async function runCalculation() {
         console.log('[APP] All standard altitudes non-viable, trying lower FLs');
         var lowerAlts = [24000, 22000, 20000, 18000];
         for (var j = 0; j < lowerAlts.length; j++) {
-            var cruiseTAS2 = getCruiseTAS(lowerAlts[j]);
+            var cruiseTAS2 = getPerformanceAtAltitude(lowerAlts[j]).cruiseTAS;
             var cruiseGS2 = cruiseTAS2;
             if (gfsData && typeof calculateGFSGroundSpeed === 'function') {
                 cruiseGS2 = calculateGFSGroundSpeed(gfsData, lowerAlts[j], trueCourse, cruiseTAS2);
@@ -340,7 +340,7 @@ async function runCalculation() {
     }
 
     if (results.length === 0) {
-        var minPlan = calculateFlight(dep, dest, 18000, getCruiseTAS(18000), gfsData);
+        var minPlan = calculateFlight(dep, dest, 18000, getPerformanceAtAltitude(18000).cruiseTAS, gfsData);
         minPlan.viable = true;
         minPlan.warning = 'Route very short — climb/descent dominate';
         results.push(minPlan);
