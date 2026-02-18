@@ -9,7 +9,8 @@ var appState = {
     departure: null,
     destination: null,
     lastResults: null,
-    gfsData: null
+    gfsData: null,
+    selectedDay: 0
 };
 
 // ============================================================
@@ -39,6 +40,14 @@ function initApp() {
         });
         document.getElementById('btn-calc').addEventListener('click', runCalculation);
 
+        initDayPills();
+
+        var depTimeInput = document.getElementById('dep-time');
+        if (depTimeInput) {
+            depTimeInput.addEventListener('change', updateZuluDisplay);
+            updateZuluDisplay();
+        }
+
         document.getElementById('dep-input').focus();
     });
 }
@@ -56,6 +65,86 @@ function tryLoadAirports(urls, idx, callback) {
             callback(null);
         }
     });
+}
+
+// ============================================================
+// DAY-OF-WEEK PILLS
+// ============================================================
+function initDayPills() {
+    var container = document.getElementById('dow-pills');
+    if (!container) return;
+
+    var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var today = new Date();
+
+    container.innerHTML = '';
+    for (var i = 0; i < 7; i++) {
+        var d = new Date(today);
+        d.setDate(today.getDate() + i);
+
+        var pill = document.createElement('div');
+        pill.className = 'dow-pill' + (i === 0 ? ' active' : '');
+        pill.setAttribute('data-offset', i);
+
+        var dayLabel = i === 0 ? 'Today' : dayNames[d.getDay()];
+        var dateLabel = monthNames[d.getMonth()] + ' ' + d.getDate();
+
+        pill.innerHTML = '<span class="dow-day">' + dayLabel + '</span>' +
+                         '<span class="dow-date">' + dateLabel + '</span>';
+
+        (function(offset) {
+            pill.addEventListener('click', function() {
+                selectDay(offset);
+            });
+        })(i);
+
+        container.appendChild(pill);
+    }
+}
+
+function selectDay(offset) {
+    appState.selectedDay = offset;
+    var pills = document.querySelectorAll('.dow-pill');
+    for (var i = 0; i < pills.length; i++) {
+        pills[i].classList.toggle('active', parseInt(pills[i].getAttribute('data-offset')) === offset);
+    }
+    updateZuluDisplay();
+}
+
+// ============================================================
+// LOCAL → ZULU CONVERSION
+// ============================================================
+function getDepartureTimeZulu() {
+    var timeInput = document.getElementById('dep-time');
+    if (!timeInput || !timeInput.value) return null;
+
+    var parts = timeInput.value.split(':');
+    var hours = parseInt(parts[0]);
+    var mins = parseInt(parts[1]) || 0;
+
+    var today = new Date();
+    var depDate = new Date(today);
+    depDate.setDate(today.getDate() + appState.selectedDay);
+    depDate.setHours(hours, mins, 0, 0);
+
+    return depDate;
+}
+
+function updateZuluDisplay() {
+    var el = document.getElementById('zulu-display');
+    if (!el) return;
+
+    var depTime = getDepartureTimeZulu();
+    if (!depTime) {
+        el.textContent = '—Z';
+        return;
+    }
+
+    var zh = String(depTime.getUTCHours()).padStart(2, '0');
+    var zm = String(depTime.getUTCMinutes()).padStart(2, '0');
+    el.textContent = zh + zm + 'Z';
 }
 
 // ============================================================
@@ -190,12 +279,13 @@ async function runCalculation() {
     btn.disabled = true;
     btn.textContent = 'Fetching winds...';
 
-    // Step 1: Fetch GFS winds along route
+    var depTimeZ = getDepartureTimeZulu();
+
     var gfsData = null;
     if (typeof fetchGFSWinds === 'function') {
         try {
             updateStatus('loading', 'Fetching GFS winds...');
-            gfsData = await fetchGFSWinds(dep, dest, null);
+            gfsData = await fetchGFSWinds(dep, dest, depTimeZ);
             appState.gfsData = gfsData;
             if (gfsData) {
                 updateStatus('ok', 'GFS winds loaded (' + gfsData.pointCount + ' pts)');
@@ -210,32 +300,23 @@ async function runCalculation() {
 
     btn.textContent = 'Calculating...';
 
-    // Step 2: Calculate true course and get altitude candidates
     var trueCourse = initialBearing(dep.lat, dep.lon, dest.lat, dest.lon);
     var altitudes = getTop3Altitudes(trueCourse);
 
-    // Step 3: Loop altitudes, compute cruise GS from GFS, build flight plans
     var results = [];
     for (var i = 0; i < altitudes.length; i++) {
         var alt = altitudes[i];
-
-        // Get cruise TAS and wind-corrected GS at this altitude
         var cruiseTAS = getCruiseTAS(alt);
         var cruiseGS = cruiseTAS;
         if (gfsData && typeof calculateGFSGroundSpeed === 'function') {
             cruiseGS = calculateGFSGroundSpeed(gfsData, alt, trueCourse, cruiseTAS);
         }
-
-        // Calculate flight with wind-corrected cruise GS and GFS data
-        // (flight-calc.js will also auto-detect _gfsWindCache for climb/descent)
         var plan = calculateFlight(dep, dest, alt, cruiseGS, gfsData);
-
         if (plan.viable) {
             results.push(plan);
         }
     }
 
-    // If all standard altitudes were non-viable (short route), try lower
     if (results.length === 0) {
         console.log('[APP] All standard altitudes non-viable, trying lower FLs');
         var lowerAlts = [24000, 22000, 20000, 18000];
@@ -253,7 +334,6 @@ async function runCalculation() {
         }
     }
 
-    // Last resort
     if (results.length === 0) {
         var minPlan = calculateFlight(dep, dest, 18000, getCruiseTAS(18000), gfsData);
         minPlan.viable = true;
@@ -271,7 +351,7 @@ async function runCalculation() {
     displayResults(output, dep, dest);
 
     btn.disabled = false;
-    btn.textContent = 'Calculate';
+    btn.textContent = 'Calculate Flight Plan';
 }
 
 // ============================================================
@@ -288,7 +368,6 @@ function displayResults(results, dep, dest) {
     document.getElementById('sum-course').textContent = results.trueCourse + '°';
     document.getElementById('sum-dir').textContent = results.direction;
 
-    // Wind source indicator
     var windSourceEl = document.getElementById('wind-source');
     if (windSourceEl) {
         if (appState.gfsData) {
@@ -301,7 +380,11 @@ function displayResults(results, dep, dest) {
         }
     }
 
-    // Fuel stop check
+    var statusWind = document.getElementById('status-wind');
+    if (statusWind) {
+        statusWind.textContent = appState.gfsData ? 'GFS winds active' : 'No wind correction';
+    }
+
     var fuelStopEl = document.getElementById('fuel-stop-indicator');
     if (needsFuelStop(results)) {
         fuelStopEl.innerHTML = '<span class="fuel-stop-badge">Fuel Stop Required</span>';
@@ -309,11 +392,9 @@ function displayResults(results, dep, dest) {
         fuelStopEl.innerHTML = '';
     }
 
-    // Altitude options table
     var tbody = document.getElementById('alt-table-body');
     tbody.innerHTML = '';
 
-    // Find best (shortest time) option
     var bestIdx = 0;
     for (var i = 1; i < results.options.length; i++) {
         if (results.options[i].totals.timeMin < results.options[bestIdx].totals.timeMin) {
@@ -326,7 +407,6 @@ function displayResults(results, dep, dest) {
         var tr = document.createElement('tr');
         if (i === bestIdx) tr.className = 'best';
 
-        // Show warning for short-route plans
         var flLabel = 'FL' + (plan.cruiseAlt / 100);
         if (plan.warning) flLabel += ' ⚠';
 
@@ -342,16 +422,13 @@ function displayResults(results, dep, dest) {
         tbody.appendChild(tr);
     }
 
-    // Auto-show phase detail for best option
     displayPhaseDetail(results.options[bestIdx]);
-
     section.scrollIntoView({ behavior: 'smooth' });
 }
 
 function displayPhaseDetail(plan) {
     var el = document.getElementById('phase-detail');
 
-    // Build wind annotation strings for climb/descent
     var climbAnnotation = '';
     var descentAnnotation = '';
     if (plan.climb.distanceNM_nowind !== undefined &&
@@ -369,7 +446,6 @@ function displayPhaseDetail(plan) {
             desSign + desDelta.toFixed(1) + ' wind)</span>';
     }
 
-    // Wind component for cruise
     var cruiseWindNote = '';
     if (plan.cruise.groundSpeed !== plan.cruise.tas) {
         var delta = plan.cruise.groundSpeed - plan.cruise.tas;
@@ -378,7 +454,6 @@ function displayPhaseDetail(plan) {
             Math.abs(Math.round(delta)) + 'kt ' + windType + ')</span>';
     }
 
-    // Warning banner for short routes
     var warningBanner = '';
     if (plan.warning) {
         warningBanner = '<div class="phase-warning">⚠ ' + plan.warning + '</div>';
