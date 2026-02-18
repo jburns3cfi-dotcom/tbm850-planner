@@ -37,24 +37,18 @@
             </div>
         </div>
 
-        <!-- Departure Day & Time Selector -->
-        <div class="departure-time-section">
-            <label class="input-label">Departure Day &amp; Time (Local)</label>
-            <div class="day-selector" id="daySelectorRow"></div>
-            <div class="time-row">
-                <input type="text"
-                       id="depTimeInput"
-                       class="time-input"
-                       placeholder="0800"
-                       maxlength="4"
-                       inputmode="numeric"
-                       pattern="[0-9]*"
-                       autocomplete="off">
-                <span class="time-label" id="depTimezoneLabel">local</span>
-                <span class="time-separator">&rarr;</span>
-                <span class="zulu-display" id="depZuluDisplay">----Z</span>
+        <!-- Day & Time Selector -->
+        <div class="input-group">
+            <label>Departure Day &amp; Time (Local)</label>
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <div id="day-pills" style="display:flex; gap:4px; flex-wrap:wrap;"></div>
+                <input type="text" id="dep-time" placeholder="1430" maxlength="4" inputmode="numeric"
+                       style="width:80px; text-align:center; font-size:1rem; padding:8px;">
+                <span style="color:var(--text-label); font-size:0.8rem;">local</span>
+                <span style="color:var(--text-label); font-size:0.8rem;">&rarr;</span>
+                <span id="zulu-display" style="font-family:var(--font-mono); color:var(--accent-blue); font-size:0.95rem;">----Z</span>
+                <span id="forecast-indicator" class="forecast-badge forecast-ok" style="margin-left:auto;"></span>
             </div>
-            <div class="forecast-indicator" id="forecastIndicator"></div>
         </div>
 
         <button id="btn-calc" class="btn-calculate" disabled>Calculate Flight Plan</button>
@@ -65,22 +59,22 @@
 
         <!-- Route Summary -->
         <div class="card">
-            <div class="card-title" id="sum-route">&mdash;</div>
+            <div class="card-title" id="sum-route">—</div>
             <div class="route-summary">
                 <div class="summary-item">
-                    <div class="value" id="sum-dist">&mdash;</div>
+                    <div class="value" id="sum-dist">—</div>
                     <div class="label">Distance (nm)</div>
                 </div>
                 <div class="summary-item">
-                    <div class="value" id="sum-course">&mdash;</div>
+                    <div class="value" id="sum-course">—</div>
                     <div class="label">True Course</div>
                 </div>
                 <div class="summary-item">
-                    <div class="value" id="sum-magcourse">&mdash;</div>
+                    <div class="value" id="sum-mag-course">—</div>
                     <div class="label">Mag Course</div>
                 </div>
                 <div class="summary-item">
-                    <div class="value" id="sum-dir">&mdash;</div>
+                    <div class="value" id="sum-dir">—</div>
                     <div class="label">Direction</div>
                 </div>
             </div>
@@ -89,8 +83,12 @@
 
         <!-- Altitude Options -->
         <div class="card">
+            <!-- Wind status bar at top of altitude card -->
+            <div id="wind-status-bar" class="wind-status-bar" style="display:none;">
+                <span class="status-dot"></span>
+                <span>No wind data</span>
+            </div>
             <div class="card-title">Altitude Options <span style="font-size:0.65rem;color:var(--text-label);font-weight:400;">(tap row for detail)</span></div>
-            <div id="wind-status-bar" class="wind-status-bar"></div>
             <table class="alt-table">
                 <thead>
                     <tr>
@@ -121,7 +119,9 @@
         <span id="status-dot" class="status-dot loading"></span>
         <span id="status-text">Initializing...</span>
     </div>
-    <div id="wind-status-footer">No wind correction</div>
+    <div id="wind-status-footer" class="wind-status-footer">
+        <span class="wind-none">No wind correction</span>
+    </div>
 </div>
 
 <!-- Load modules in dependency order -->
@@ -130,7 +130,6 @@
 <script src="js/route.js"></script>
 <script src="js/winds.js"></script>
 <script src="js/flight-calc.js"></script>
-<script src="js/timezone.js"></script>
 <script src="js/app.js"></script>
 
 </body>
