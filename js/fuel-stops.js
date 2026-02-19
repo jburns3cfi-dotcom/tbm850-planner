@@ -636,9 +636,17 @@ const FuelStops = (() => {
       wrapper.innerHTML = html;
       const old = document.querySelector('#fuel-stops-ranked');
       if (old) old.remove();
-      if (container.tagName === 'TABLE') container.parentElement.insertBefore(wrapper, container.nextSibling);
-      else container.appendChild(wrapper);
-      console.log('[FuelStops] Ranked results rendered');
+      if (container.tagName === 'TABLE') {
+        container.parentElement.insertBefore(wrapper, container.nextSibling);
+        // Hide the raw candidate table — ranked results replace it
+        container.style.display = 'none';
+      } else {
+        // Hide any raw candidate table inside the container
+        const rawTable = container.querySelector('table');
+        if (rawTable && !rawTable.closest('#fuel-stops-ranked')) rawTable.style.display = 'none';
+        container.appendChild(wrapper);
+      }
+      console.log('[FuelStops] Ranked results rendered (raw candidate list hidden)');
     }
   }
 
