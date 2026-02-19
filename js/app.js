@@ -20,6 +20,12 @@ var appState = {
 function initApp() {
     updateStatus('loading', 'Loading airports...');
 
+    // Ensure departure time input is EMPTY on startup — no default
+    var timeInput = document.getElementById('departure-time-input');
+    if (timeInput) {
+        timeInput.value = '';
+    }
+
     // CSV is in REPO ROOT. Fallback uses apple branch.
     var csvUrls = [
         'us-airports.csv',
@@ -53,6 +59,11 @@ function initApp() {
         // Initialize departure time module
         if (typeof DepartureTime !== 'undefined') {
             DepartureTime.init();
+        }
+
+        // Clear the time input AGAIN after DepartureTime.init() in case it sets a default
+        if (timeInput) {
+            timeInput.value = '';
         }
 
         // Listen for departure time/day changes
@@ -327,7 +338,60 @@ function displayResults(results, dep, dest) {
 
     displayPhaseDetail(results.options[bestIdx]);
     displayFuelStops();
+
+    // Fetch and display METAR + TAF + NOTAM for departure and destination
+    displayRouteWeather(dep.ident, dest.ident);
+
     section.scrollIntoView({ behavior: 'smooth' });
+}
+
+// ============================================================
+// DEPARTURE / DESTINATION WEATHER (METAR + TAF + NOTAM)
+// ============================================================
+function displayRouteWeather(depIdent, destIdent) {
+    if (typeof FuelStops === 'undefined') return;
+
+    // Find or create the weather container — place it after the route summary card
+    var existing = document.getElementById('route-weather-section');
+    if (existing) existing.remove();
+
+    var summaryCard = document.getElementById('fuel-stop-indicator');
+    if (!summaryCard) return;
+    var parentCard = summaryCard.closest('.card');
+    if (!parentCard) return;
+
+    var weatherDiv = document.createElement('div');
+    weatherDiv.id = 'route-weather-section';
+    weatherDiv.className = 'card';
+    weatherDiv.innerHTML =
+        '<div class="card-title">Airport Weather</div>' +
+        '<div id="dep-weather-block" style="margin-bottom:12px;">' +
+            '<div style="font-weight:600;font-size:14px;color:#e0e8f0;">' + escHTML(depIdent) + ' — Departure</div>' +
+            '<div id="dep-metar-line" style="color:#aab;font-size:12px;margin-top:4px;">Loading METAR...</div>' +
+        '</div>' +
+        '<div id="dest-weather-block">' +
+            '<div style="font-weight:600;font-size:14px;color:#e0e8f0;">' + escHTML(destIdent) + ' — Destination</div>' +
+            '<div id="dest-metar-line" style="color:#aab;font-size:12px;margin-top:4px;">Loading METAR...</div>' +
+        '</div>';
+
+    parentCard.parentNode.insertBefore(weatherDiv, parentCard.nextSibling);
+
+    // Fetch METARs in parallel
+    Promise.all([
+        FuelStops.fetchMetar(depIdent),
+        FuelStops.fetchMetar(destIdent)
+    ]).then(function(results) {
+        var depMetar = results[0];
+        var destMetar = results[1];
+
+        var depEl = document.getElementById('dep-metar-line');
+        var destEl = document.getElementById('dest-metar-line');
+
+        if (depEl) depEl.innerHTML = FuelStops.buildAirportWeatherHtml(depIdent, depMetar);
+        if (destEl) destEl.innerHTML = FuelStops.buildAirportWeatherHtml(destIdent, destMetar);
+    }).catch(function(err) {
+        console.warn('Route weather fetch error:', err);
+    });
 }
 
 function displayPhaseDetail(plan) {
