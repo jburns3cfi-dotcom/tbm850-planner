@@ -127,14 +127,24 @@ const FuelStops = (() => {
         let txt = '';
         try {
           const data = JSON.parse(raw);
-          if (Array.isArray(data)) {
-            txt = data.map(n => typeof n === 'string' ? n : (n.text || n.raw || n.notam || JSON.stringify(n))).join('\n\n');
+          // Worker returns { airport, count, notamList, debug_* }
+          if (data.notamList && Array.isArray(data.notamList)) {
+            if (data.notamList.length === 0) {
+              txt = 'No NOTAMs currently published for ' + icao + '.';
+            } else {
+              txt = data.notamList.map(n => typeof n === 'string' ? n : (n.text || n.raw || n.notam || JSON.stringify(n))).join('\n\n');
+            }
+          } else if (Array.isArray(data)) {
+            txt = data.length === 0 ? ('No NOTAMs found for ' + icao + '.') :
+              data.map(n => typeof n === 'string' ? n : (n.text || n.raw || n.notam || JSON.stringify(n))).join('\n\n');
           } else if (data.notams && Array.isArray(data.notams)) {
-            txt = data.notams.map(n => typeof n === 'string' ? n : (n.text || n.raw || n.notam || JSON.stringify(n))).join('\n\n');
+            txt = data.notams.length === 0 ? ('No NOTAMs found for ' + icao + '.') :
+              data.notams.map(n => typeof n === 'string' ? n : (n.text || n.raw || n.notam || JSON.stringify(n))).join('\n\n');
           } else if (data.text || data.raw || data.notam) {
             txt = data.text || data.raw || data.notam;
-          } else if (typeof data === 'object') {
-            txt = JSON.stringify(data, null, 2);
+          } else {
+            // Filter out debug fields — only show airport and count
+            txt = 'No NOTAMs currently published for ' + (data.airport || icao) + '.';
           }
         } catch (e) {
           txt = raw;
@@ -563,9 +573,11 @@ const FuelStops = (() => {
   }
 
   // Public helper for app.js dep/dest weather display
-  function buildAirportWeatherHtml(icao, metarText) {
+  // dark=true for dark-themed cards (dep/dest), dark=false for white backgrounds
+  function buildAirportWeatherHtml(icao, metarText, dark) {
     const display = metarText ? (metarText.length > 140 ? metarText.substring(0, 137) + '...' : metarText) : 'METAR unavailable';
-    return '<div style="margin-top:4px;"><span style="font-family:\'Courier New\',Courier,monospace;font-size:12px;color:#111827;line-height:1.4;">' + escapeHtml(display) + '</span>' + btnTaf(icao) + btnNotam(icao) + '</div>';
+    const txtColor = dark ? '#e0e8f0' : '#111827';
+    return '<div style="margin-top:4px;"><span style="font-family:\'Courier New\',Courier,monospace;font-size:12px;color:' + txtColor + ';line-height:1.4;">' + escapeHtml(display) + '</span>' + btnTaf(icao) + btnNotam(icao) + '</div>';
   }
 
   function escapeHtml(str) {

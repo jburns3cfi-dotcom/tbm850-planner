@@ -387,8 +387,8 @@ function displayRouteWeather(depIdent, destIdent) {
         var depEl = document.getElementById('dep-metar-line');
         var destEl = document.getElementById('dest-metar-line');
 
-        if (depEl) depEl.innerHTML = FuelStops.buildAirportWeatherHtml(depIdent, depMetar);
-        if (destEl) destEl.innerHTML = FuelStops.buildAirportWeatherHtml(destIdent, destMetar);
+        if (depEl) depEl.innerHTML = FuelStops.buildAirportWeatherHtml(depIdent, depMetar, true);
+        if (destEl) destEl.innerHTML = FuelStops.buildAirportWeatherHtml(destIdent, destMetar, true);
     }).catch(function(err) {
         console.warn('Route weather fetch error:', err);
     });
