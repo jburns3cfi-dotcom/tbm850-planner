@@ -1,16 +1,16 @@
 // ============================================================
-// fuel-stops.js — TBM850 Fuel Stop Module v10
+// fuel-stops.js — TBM850 Fuel Stop Module v11
 // ============================================================
 // CAA-first fuel pricing with AirNav fallback
 // Ranking: Fastest / Cheapest / Best
 // 2-stop strategy for long routes
-// v10: METAR + TAF + NOTAM per fuel stop airport
+// v11: NOTAM fix — uses airnav-grab worker (type=notam) like Windows
 // CAA and AirNav called DIRECTLY — NEVER through proxy
-// NOTAM proxy called DIRECTLY
+// NOTAMs via airnav-grab worker (FAA NMS-API)
 // ============================================================
 
 const FuelStops = (() => {
-  console.log('[FuelStops] v10 loaded — METAR + TAF + NOTAM per fuel stop');
+  console.log('[FuelStops] v11 loaded — NOTAM via airnav-grab worker (FAA NMS)');
 
   // ---- CONSTANTS ----
   const MAX_FUEL_GAL = 282;
@@ -29,7 +29,7 @@ const FuelStops = (() => {
   // Workers — called DIRECTLY, never through proxy
   const CAA_URL = 'https://caa-fuel.jburns3cfi.workers.dev';
   const AIRNAV_URL = 'https://airnav-grab.jburns3cfi.workers.dev';
-  const NOTAM_URL = 'https://notam-proxy.jburns3cfi.workers.dev';
+  // NOTAMs now fetched via AIRNAV_URL with ?type=notam (same as Windows version)
 
   // ---- STATE ----
   let caaAirports = null;
@@ -118,17 +118,32 @@ const FuelStops = (() => {
     const title = document.getElementById('notam-modal-title');
     const body = document.getElementById('notam-modal-body');
     title.textContent = 'NOTAMs \u2014 ' + icao;
-    body.textContent = 'Loading NOTAMs...';
+    body.textContent = 'Loading NOTAMs from FAA NMS...';
     overlay.style.display = 'flex';
     if (notamCache[icao]) { body.textContent = notamCache[icao]; return; }
-    fetch(NOTAM_URL + '/?id=' + icao)
+    fetch(AIRNAV_URL + '/?type=notam&id=' + icao)
       .then(resp => { if (!resp.ok) throw new Error('HTTP ' + resp.status); return resp.text(); })
       .then(raw => {
         let txt = '';
         try {
           const data = JSON.parse(raw);
-          // Worker returns { airport, count, notamList, debug_* }
-          if (data.notamList && Array.isArray(data.notamList)) {
+          // airnav-grab worker returns { airport, type, count, notams: [{classification, id, start, end, raw, text}] }
+          if (data.notams && Array.isArray(data.notams)) {
+            if (data.notams.length === 0) {
+              txt = '\u2705 No active NOTAMs for ' + icao + '.';
+            } else {
+              txt = data.notams.map(n => {
+                let header = '';
+                if (n.classification) header += '[' + n.classification + '] ';
+                if (n.id) header += n.id + ' ';
+                if (n.start || n.end) header += '(' + (n.start || '?') + ' \u2014 ' + (n.end || '?') + ')';
+                const body = n.raw || n.text || n.notam || '';
+                return (header ? header.trim() + '\n' : '') + body;
+              }).join('\n\n' + '\u2500'.repeat(50) + '\n\n');
+              txt = data.count + ' active NOTAM' + (data.count !== 1 ? 's' : '') + ' for ' + icao + '\n\n' + txt;
+            }
+          } else if (data.notamList && Array.isArray(data.notamList)) {
+            // Fallback: old notam-proxy format
             if (data.notamList.length === 0) {
               txt = 'No NOTAMs currently published for ' + icao + '.';
             } else {
@@ -137,13 +152,11 @@ const FuelStops = (() => {
           } else if (Array.isArray(data)) {
             txt = data.length === 0 ? ('No NOTAMs found for ' + icao + '.') :
               data.map(n => typeof n === 'string' ? n : (n.text || n.raw || n.notam || JSON.stringify(n))).join('\n\n');
-          } else if (data.notams && Array.isArray(data.notams)) {
-            txt = data.notams.length === 0 ? ('No NOTAMs found for ' + icao + '.') :
-              data.notams.map(n => typeof n === 'string' ? n : (n.text || n.raw || n.notam || JSON.stringify(n))).join('\n\n');
           } else if (data.text || data.raw || data.notam) {
             txt = data.text || data.raw || data.notam;
+          } else if (data.error) {
+            txt = '\u274C Error: ' + data.error;
           } else {
-            // Filter out debug fields — only show airport and count
             txt = 'No NOTAMs currently published for ' + (data.airport || icao) + '.';
           }
         } catch (e) {
