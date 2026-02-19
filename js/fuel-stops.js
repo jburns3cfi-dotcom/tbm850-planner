@@ -43,6 +43,7 @@ const FuelStops = (() => {
   const metarCache = {};
   const tafCache = {};
   const notamCache = {};
+  const coordCache = {}; // { ICAO: { lat, lon } } for TAF nearest-airport lookup
 
   // ========================================
   // TAF POPUP MODAL
@@ -72,17 +73,46 @@ const FuelStops = (() => {
     title.textContent = 'TAF Forecast \u2014 ' + icao;
     body.textContent = 'Loading TAF...';
     overlay.style.display = 'flex';
-    if (tafCache[icao]) { body.textContent = tafCache[icao]; return; }
-    fetch(AIRNAV_URL + '/?type=taf&id=' + icao)
+    if (tafCache[icao]) { body.textContent = tafCache[icao]; title.textContent = tafCache[icao + '_title'] || ('TAF Forecast \u2014 ' + icao); return; }
+    // Build URL with lat/lon for nearest-airport fallback
+    let url = AIRNAV_URL + '/?type=taf&id=' + icao;
+    let coords = coordCache[icao];
+    // Fallback: look up coords from airport DB if not cached
+    if (!coords) {
+      const apt = findAirport(icao);
+      if (apt) {
+        const lat = getLat(apt), lon = getLon(apt);
+        if (lat != null && lon != null) { coords = { lat, lon }; coordCache[icao] = coords; }
+      }
+    }
+    if (coords && coords.lat != null && coords.lon != null) {
+      url += '&lat=' + coords.lat.toFixed(4) + '&lon=' + coords.lon.toFixed(4);
+    }
+    fetch(url)
       .then(resp => { if (!resp.ok) throw new Error('HTTP ' + resp.status); return resp.json(); })
       .then(data => {
-        let txt = data.taf || data.raw || (typeof data === 'string' ? data : JSON.stringify(data, null, 2));
-        tafCache[icao] = txt || 'No TAF available for this airport.';
-        body.textContent = tafCache[icao];
+        let txt = '';
+        let modalTitle = 'TAF Forecast \u2014 ' + icao;
+        if (data.raw || data.taf) {
+          txt = data.raw || data.taf;
+          // If this is from a nearby airport, show which one
+          if (data.isNearest && data.airport && data.airport !== icao) {
+            modalTitle = 'TAF Forecast \u2014 ' + icao + ' (nearest: ' + data.airport + ')';
+            txt = '\u2139\uFE0F No TAF issued for ' + icao + '\nShowing nearest TAF from ' + data.airport +
+                  (data.distance ? ' (' + data.distance + ' nm away)' : '') +
+                  '\n\n' + txt;
+          }
+        } else {
+          txt = 'No TAF available for ' + icao + ' or nearby airports.';
+        }
+        tafCache[icao] = txt;
+        tafCache[icao + '_title'] = modalTitle;
+        title.textContent = modalTitle;
+        body.textContent = txt;
       })
       .catch(err => {
         console.warn('[FuelStops] TAF fetch failed for ' + icao + ':', err);
-        tafCache[icao] = 'TAF not available for ' + icao + '.\n\nThis airport may not have a TAF issued.\nCheck nearby airports for the closest forecast.';
+        tafCache[icao] = 'TAF not available for ' + icao + '.';
         body.textContent = tafCache[icao];
       });
   }
@@ -457,6 +487,10 @@ const FuelStops = (() => {
     });
     const results = candidates.slice(0, 8);
     lastCandidates = results;
+    // Cache coordinates for TAF nearest-airport lookup
+    coordCache[depIdent] = { lat: depLat, lon: depLon };
+    coordCache[destIdent] = { lat: destLat, lon: destLon };
+    for (const c of results) coordCache[c.airport.ident] = { lat: c.lat, lon: c.lon };
     const caaCount = results.filter(c => c.isCaa).length;
     console.log('[FuelStops] Found ' + results.length + ' fuel stop candidates (' + caaCount + ' CAA) from ' + corridorCount + ' in corridor');
     setTimeout(() => runRankingAnalysis(), 250);
@@ -802,10 +836,16 @@ const FuelStops = (() => {
   // ========================================
   // PUBLIC API
   // ========================================
+
+  // Allow external code to register coordinates for TAF nearest-airport lookup
+  function registerCoords(icao, lat, lon) {
+    if (icao && lat != null && lon != null) coordCache[icao] = { lat, lon };
+  }
+
   return {
     findCandidates, getAirportFuel, isCAA, calcFuelBurn, fuelRemaining,
     maxFlightTime, fetchAirNavFuel, fetchMetar, buildAirportWeatherHtml,
-    showTafModal, showNotamModal,
+    showTafModal, showNotamModal, registerCoords,
     MAX_FUEL: MAX_FUEL_GAL, MIN_LANDING: MIN_LANDING_GAL, TRIGGER_HOURS: FUEL_STOP_TRIGGER_HRS
   };
 })();
